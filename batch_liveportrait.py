@@ -94,16 +94,18 @@ if os.path.exists(mesh_init_file):
         with open(mesh_init_file, 'w', encoding='utf-8') as f:
             f.write(mesh_init_code)
 
-# Nạp weights từ Drive Cache
+# Nạp weights từ Drive Cache hoặc HuggingFace
 drive_weights_dir = os.path.join(base_dir, "pretrained_weights")
-if os.path.exists(drive_weights_dir) and os.path.exists(os.path.join(drive_weights_dir, "liveportrait/base_models/appearance_feature_extractor.pth")):
-    if not os.path.exists('/content/LivePortrait/pretrained_weights'):
+target_weight = '/content/LivePortrait/pretrained_weights/liveportrait/base_models/appearance_feature_extractor.pth'
+drive_target_weight = os.path.join(drive_weights_dir, "liveportrait/base_models/appearance_feature_extractor.pth")
+
+if not os.path.exists(target_weight):
+    if os.path.exists(drive_target_weight) and os.path.getsize(drive_target_weight) > 100000:
         print("  ✓ Nạp trọng số từ Google Drive Cache...")
-        shutil.copytree(drive_weights_dir, '/content/LivePortrait/pretrained_weights')
-else:
-    if not os.path.exists('/content/LivePortrait/pretrained_weights'):
+        shutil.copytree(drive_weights_dir, '/content/LivePortrait/pretrained_weights', dirs_exist_ok=True)
+    else:
         from huggingface_hub import snapshot_download
-        print("  ⏳ Tải trọng số từ HuggingFace...")
+        print("  ⏳ Tải toàn bộ trọng số AI thật (~650MB) từ HuggingFace...")
         snapshot_download(repo_id='camenduru/LivePortrait', local_dir='/content/LivePortrait/pretrained_weights', local_dir_use_symlinks=False)
         if has_drive:
             print("  💾 Đang lưu bản sao trọng số vào Google Drive để lần sau nạp ngay trong 3 giây...")
