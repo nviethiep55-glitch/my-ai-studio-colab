@@ -6,6 +6,19 @@ import shutil
 import argparse
 import subprocess
 
+# Bắt buộc nạp torch trước để Colab preload toàn bộ thư viện CUDA và cuDNN vào process
+try:
+    import torch
+except Exception:
+    pass
+
+try:
+    import onnxruntime as ort
+    if hasattr(ort, "preload_dlls"):
+        ort.preload_dlls()
+except Exception:
+    pass
+
 print("=" * 65)
 print("🚀 BATCH FACE SWAP STUDIO - HOÁN ĐỔI MẶT HÀNG LOẠT QUA GOOGLE DRIVE")
 print("=" * 65)
@@ -83,9 +96,13 @@ if not has_cuda:
     print("  ⏳ Đang kích hoạt CUDA GPU cho ONNX Runtime...", flush=True)
     subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "onnxruntime", "onnxruntime-gpu"], check=False)
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", "onnxruntime-gpu"], check=True)
-    import importlib
+    try:
+        import torch
+    except Exception:
+        pass
     import onnxruntime as ort
-    importlib.reload(ort)
+    if hasattr(ort, "preload_dlls"):
+        ort.preload_dlls()
 
 import cv2
 import numpy as np
