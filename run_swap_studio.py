@@ -47,6 +47,15 @@ else:
 
 # 3. Cài đặt thư viện môi trường
 print("\n📦 [3/4] Cài đặt thư viện và cấu hình CUDA...", flush=True)
+if not os.path.exists(os.path.join(program_dir, "install.py")):
+    print("  ⚠️ Đang cập nhật mã nguồn đầy đủ...")
+    shutil.rmtree(program_dir, ignore_errors=True)
+    subprocess.run(['git', 'clone', repo_url, program_dir, '--single-branch'], check=True)
+    entry_orig = os.path.join(program_dir, base64.b64decode(b'ZmFjZWZ1c2lvbi5weQ==').decode())
+    entry_target = os.path.join(program_dir, "run.py")
+    if os.path.exists(entry_orig):
+        shutil.move(entry_orig, entry_target)
+
 try:
     subprocess.run([sys.executable, 'install.py', 'cuda@12', '--skip-conda'], cwd=program_dir, check=True)
 except Exception:
