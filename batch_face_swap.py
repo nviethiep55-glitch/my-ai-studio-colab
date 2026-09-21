@@ -95,7 +95,8 @@ except Exception:
 if not has_cuda:
     print("  ⏳ Đang kích hoạt CUDA GPU cho ONNX Runtime trên Tesla T4...", flush=True)
     subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "onnxruntime", "onnxruntime-gpu"], check=False)
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "onnxruntime-gpu"], check=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "onnxruntime-gpu", "--extra-index-url", "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"], check=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"], check=False)
     print("  🚀 Tự động nạp nhân CUDA GPU vào tiến trình mới...", flush=True)
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
