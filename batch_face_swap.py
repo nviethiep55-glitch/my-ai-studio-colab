@@ -93,16 +93,11 @@ except Exception:
     has_cuda = False
 
 if not has_cuda:
-    print("  ⏳ Đang kích hoạt CUDA GPU cho ONNX Runtime...", flush=True)
+    print("  ⏳ Đang kích hoạt CUDA GPU cho ONNX Runtime trên Tesla T4...", flush=True)
     subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "onnxruntime", "onnxruntime-gpu"], check=False)
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", "onnxruntime-gpu"], check=True)
-    try:
-        import torch
-    except Exception:
-        pass
-    import onnxruntime as ort
-    if hasattr(ort, "preload_dlls"):
-        ort.preload_dlls()
+    print("  🚀 Tự động nạp nhân CUDA GPU vào tiến trình mới...", flush=True)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 import cv2
 import numpy as np
