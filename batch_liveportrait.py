@@ -24,7 +24,8 @@ else:
     except Exception as e:
         print(f"  ⚠️ Không thể kết nối Drive tự động ({e}).")
 
-base_dir = "/content/drive/MyDrive/AI_Colab_Cache/LivePortrait_Batch" if has_drive else "/content/LivePortrait_Batch"
+# Đặt ngay trong thư mục LivePortrait quen thuộc của người dùng
+base_dir = "/content/drive/MyDrive/AI_Colab_Cache/LivePortrait" if has_drive else "/content/LivePortrait_Batch"
 input_dir = os.path.join(base_dir, "inputs")
 driving_dir = os.path.join(base_dir, "driving")
 output_dir = os.path.join(base_dir, "outputs")
@@ -76,8 +77,8 @@ torch.load = _safe_torch_load
 
 subprocess.run(['git', 'checkout', 'src/utils/helper.py'], stderr=subprocess.DEVNULL)
 
-# Nạp weights
-drive_weights_dir = "/content/drive/MyDrive/AI_Colab_Cache/LivePortrait/pretrained_weights"
+# Nạp weights từ Drive Cache
+drive_weights_dir = os.path.join(base_dir, "pretrained_weights")
 if os.path.exists(drive_weights_dir) and os.path.exists(os.path.join(drive_weights_dir, "liveportrait/base_models/appearance_feature_extractor.pth")):
     if not os.path.exists('/content/LivePortrait/pretrained_weights'):
         print("  ✓ Nạp trọng số từ Google Drive Cache...")
@@ -171,7 +172,6 @@ for idx, img_path in enumerate(images, 1):
     
     try:
         res = pipeline.execute(args)
-        # res trả về tuple: (video_path, video_path_concat) hoặc tương tự
         if isinstance(res, (list, tuple)) and len(res) > 0 and res[0] and os.path.exists(res[0]):
             shutil.copy(res[0], out_final_path)
         elapse = time.time() - start_t
