@@ -5,6 +5,9 @@ import glob
 import shutil
 import subprocess
 
+# Đảm bảo đường dẫn mã nguồn LivePortrait luôn nằm đầu sys.path
+sys.path.insert(0, '/content/LivePortrait')
+
 print("=" * 65)
 print("🚀 LIVEPORTRAIT BATCH STUDIO - CHẾ ĐỘ CHẠY HÀNG LOẠT CÔNG NGHIỆP")
 print("=" * 65)
@@ -22,9 +25,8 @@ else:
         has_drive = True
         print("  ✓ Đã gắn kết Google Drive thành công!")
     except Exception as e:
-        print(f"  ⚠️ Không thể kết nối Drive tự động ({e}).")
+        print(f"  ⚠️ Chưa gắn kết Drive ({e}). Sẽ sử dụng bộ nhớ tạm /content.")
 
-# Đặt ngay trong thư mục LivePortrait quen thuộc của người dùng
 base_dir = "/content/drive/MyDrive/AI_Colab_Cache/LivePortrait" if has_drive else "/content/LivePortrait_Batch"
 input_dir = os.path.join(base_dir, "inputs")
 driving_dir = os.path.join(base_dir, "driving")
@@ -38,7 +40,7 @@ print(f"  📁 Thư mục chứa ảnh nhân vật : {input_dir}")
 print(f"  📁 Thư mục chứa video cử động: {driving_dir}")
 print(f"  📁 Thư mục lưu video kết quả : {output_dir}")
 
-# 2. Kiểm tra mã nguồn và thư viện
+# 2. Chuẩn bị mã nguồn và thư viện
 print("\n⚡ [2/5] Chuẩn bị môi trường LivePortrait...")
 os.chdir('/content')
 if not os.path.exists('/content/LivePortrait'):
@@ -88,13 +90,19 @@ else:
         from huggingface_hub import snapshot_download
         print("  ⏳ Tải trọng số từ HuggingFace...")
         snapshot_download(repo_id='camenduru/LivePortrait', local_dir='/content/LivePortrait/pretrained_weights', local_dir_use_symlinks=False)
+        if has_drive:
+            print("  💾 Đang lưu bản sao trọng số vào Google Drive để lần sau nạp ngay trong 3 giây...")
+            os.makedirs(drive_weights_dir, exist_ok=True)
+            shutil.copytree('/content/LivePortrait/pretrained_weights', drive_weights_dir, dirs_exist_ok=True)
 
 # Biên dịch Cython
 mesh_cython_dir = '/content/LivePortrait/src/utils/dependencies/insightface/thirdparty/face3d/mesh/cython'
 if not glob.glob(os.path.join(mesh_cython_dir, '*.so')):
     os.chdir(mesh_cython_dir)
     subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], check=True)
-    os.chdir('/content/LivePortrait')
+
+# Luôn quay về thư mục gốc LivePortrait
+os.chdir('/content/LivePortrait')
 
 # 3. Chuẩn bị dữ liệu mẫu nếu thư mục trống
 image_exts = ('*.jpg', '*.jpeg', '*.png', '*.webp', '*.JPG', '*.PNG')
@@ -109,18 +117,21 @@ for ext in video_exts:
 
 # Nếu chưa có video lái, copy video mẫu từ assets
 if not driving_videos:
-    sample_video = '/content/LivePortrait/assets/examples/driving/d0.mp4'
-    if os.path.exists(sample_video):
+    available_driving = glob.glob('/content/LivePortrait/assets/examples/driving/*.mp4')
+    if available_driving:
         dest_video = os.path.join(driving_dir, 'sample_driving.mp4')
-        shutil.copy(sample_video, dest_video)
+        shutil.copy(available_driving[0], dest_video)
         driving_videos.append(dest_video)
         print(f"  ℹ️ Đã tự tạo 1 video lái mẫu tại: {dest_video}")
 
 # Nếu chưa có ảnh, copy ảnh mẫu từ assets
 if not images:
-    sample_img = '/content/LivePortrait/assets/examples/source/s6.jpg'
-    if os.path.exists(sample_img):
-        dest_img = os.path.join(input_dir, 'sample_portrait.jpg')
+    available_images = []
+    for ext in image_exts:
+        available_images.extend(glob.glob(f'/content/LivePortrait/assets/examples/source/{ext}'))
+    if available_images:
+        sample_img = available_images[0]
+        dest_img = os.path.join(input_dir, f'sample_portrait{os.path.splitext(sample_img)[1]}')
         shutil.copy(sample_img, dest_img)
         images.append(dest_img)
         print(f"  ℹ️ Đã tự tạo 1 ảnh chân dung mẫu tại: {dest_img}")
@@ -182,5 +193,5 @@ for idx, img_path in enumerate(images, 1):
 total_elapse = time.time() - total_start
 print("\n" + "=" * 65)
 print(f"🎉 TẤT CẢ ĐÃ HOÀN TẤT! Tổng thời gian: {total_elapse:.1f}s")
-print(f"📁 Toàn bộ video kết quả đã lưu tại Google Drive: {output_dir}")
+print(f"📁 Toàn bộ video kết quả đã lưu tại: {output_dir}")
 print("=" * 65)
