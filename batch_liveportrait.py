@@ -94,22 +94,44 @@ if os.path.exists(mesh_init_file):
         with open(mesh_init_file, 'w', encoding='utf-8') as f:
             f.write(mesh_init_code)
 
-# Nạp weights từ Drive Cache hoặc HuggingFace
+# Nạp weights từ Drive Cache hoặc HuggingFace (Kiểm tra đầy đủ 8 file cốt lõi)
 drive_weights_dir = os.path.join(base_dir, "pretrained_weights")
-target_weight = '/content/LivePortrait/pretrained_weights/liveportrait/base_models/appearance_feature_extractor.pth'
-drive_target_weight = os.path.join(drive_weights_dir, "liveportrait/base_models/appearance_feature_extractor.pth")
+core_files = [
+    "liveportrait/base_models/appearance_feature_extractor.pth",
+    "liveportrait/base_models/motion_extractor.pth",
+    "liveportrait/base_models/spade_generator.pth",
+    "liveportrait/base_models/warping_module.pth",
+    "liveportrait/retargeting_models/stitching_retargeting_module.pth",
+    "liveportrait/landmark.onnx",
+    "insightface/models/buffalo_l/det_10g.onnx",
+    "insightface/models/buffalo_l/2d106det.onnx"
+]
 
-if not os.path.exists(target_weight):
-    if os.path.exists(drive_target_weight) and os.path.getsize(drive_target_weight) > 100000:
-        print("  ✓ Nạp trọng số từ Google Drive Cache...")
+all_local_valid = all(
+    os.path.exists(os.path.join('/content/LivePortrait/pretrained_weights', f)) and
+    os.path.getsize(os.path.join('/content/LivePortrait/pretrained_weights', f)) > 100000
+    for f in core_files
+)
+
+if not all_local_valid:
+    all_drive_valid = all(
+        os.path.exists(os.path.join(drive_weights_dir, f)) and
+        os.path.getsize(os.path.join(drive_weights_dir, f)) > 100000
+        for f in core_files
+    )
+    if all_drive_valid:
+        print("  ✓ Nạp đầy đủ 8 file trọng số từ Google Drive Cache...", flush=True)
         shutil.copytree(drive_weights_dir, '/content/LivePortrait/pretrained_weights', dirs_exist_ok=True)
     else:
         from huggingface_hub import snapshot_download
-        print("  ⏳ Tải toàn bộ trọng số AI thật (~650MB) từ HuggingFace...")
+        print("  ⏳ Đang tải toàn bộ 8 file trọng số AI thật (~650MB) từ HuggingFace...", flush=True)
+        shutil.rmtree('/content/LivePortrait/pretrained_weights', ignore_errors=True)
+        if os.path.exists(drive_weights_dir):
+            shutil.rmtree(drive_weights_dir, ignore_errors=True)
         snapshot_download(repo_id='camenduru/LivePortrait', local_dir='/content/LivePortrait/pretrained_weights', local_dir_use_symlinks=False)
         if has_drive:
-            print("  💾 Đang lưu bản sao trọng số vào Google Drive để lần sau nạp ngay trong 3 giây...")
-            os.makedirs(drive_weights_dir, exist_ok=True)
+            print("  💾 Đang lưu bản sao trọng số hoàn chỉnh vào Google Drive để lần sau nạp ngay...", flush=True)
+            os.makedirs(drive_cache_dir, exist_ok=True)
             shutil.copytree('/content/LivePortrait/pretrained_weights', drive_weights_dir, dirs_exist_ok=True)
 
 # Biên dịch Cython nếu có thể
@@ -182,11 +204,17 @@ default_args.flag_do_crop = True
 inference_cfg = partial_fields(InferenceConfig, default_args.__dict__)
 crop_cfg = partial_fields(CropConfig, default_args.__dict__)
 
-pipeline = LivePortraitPipeline(inference_cfg=inference_cfg, crop_cfg=crop_cfg)
-print("  ✓ Mô hình AI đã nạp sẵn vào VRAM!")
+try:
+    pipeline = LivePortraitPipeline(inference_cfg=inference_cfg, crop_cfg=crop_cfg)
+    print("  ✓ Mô hình AI đã nạp sẵn vào VRAM!", flush=True)
+except Exception as e:
+    import traceback
+    print("  ❌ LỖI KHỞI TẠO PIPELINE LIVEPORTRAIT:", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
 
 # 5. Vòng lặp Render Hàng Loạt Siêu Tốc
-print("\n🚀 [5/5] BẮT ĐẦU XỬ LÝ HÀNG LOẠT (BATCH PROCESSING)...")
+print("\n🚀 [5/5] BẮT ĐẦU XỬ LÝ HÀNG LOẠT (BATCH PROCESSING)...", flush=True)
 total_start = time.time()
 
 for idx, img_path in enumerate(images, 1):
@@ -195,7 +223,7 @@ for idx, img_path in enumerate(images, 1):
     out_name = f"result_{stem}.mp4"
     out_final_path = os.path.join(output_dir, out_name)
     
-    print(f"\n[{idx}/{len(images)}] Đang xử lý: {img_name}...")
+    print(f"\n[{idx}/{len(images)}] Đang xử lý: {img_name}...", flush=True)
     start_t = time.time()
     
     args = ArgumentConfig()
@@ -210,12 +238,12 @@ for idx, img_path in enumerate(images, 1):
         if isinstance(res, (list, tuple)) and len(res) > 0 and res[0] and os.path.exists(res[0]):
             shutil.copy(res[0], out_final_path)
         elapse = time.time() - start_t
-        print(f"  ✅ Hoàn tất trong {elapse:.1f}s -> Đã lưu: {out_name}")
+        print(f"  ✅ Hoàn tất trong {elapse:.1f}s -> Đã lưu: {out_name}", flush=True)
     except Exception as e:
-        print(f"  ❌ Lỗi khi xử lý {img_name}: {e}")
+        print(f"  ❌ Lỗi khi xử lý {img_name}: {e}", flush=True)
 
 total_elapse = time.time() - total_start
-print("\n" + "=" * 65)
-print(f"🎉 TẤT CẢ ĐÃ HOÀN TẤT! Tổng thời gian: {total_elapse:.1f}s")
-print(f"📁 Toàn bộ video kết quả đã lưu tại: {output_dir}")
-print("=" * 65)
+print("\n" + "=" * 65, flush=True)
+print(f"🎉 TẤT CẢ ĐÃ HOÀN TẤT! Tổng thời gian: {total_elapse:.1f}s", flush=True)
+print(f"📁 Toàn bộ video kết quả đã lưu tại: {output_dir}", flush=True)
+print("=" * 65, flush=True)
