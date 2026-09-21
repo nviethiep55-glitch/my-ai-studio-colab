@@ -46,11 +46,14 @@ else:
         shutil.copytree(program_dir, drive_cache_dir, dirs_exist_ok=True)
 
 # 3. Cài đặt thư viện môi trường
-print("\n📦 [3/4] Cài đặt thư viện và cấu hình CUDA...")
+print("\n📦 [3/4] Cài đặt thư viện và cấu hình CUDA...", flush=True)
 try:
-    subprocess.run([sys.executable, 'install.py', '--onnxruntime', 'cuda@12', '--skip-conda'], check=True)
+    subprocess.run([sys.executable, 'install.py', 'cuda@12', '--skip-conda'], cwd=program_dir, check=True)
 except Exception:
-    subprocess.run([sys.executable, 'install.py', '--onnxruntime', 'default', '--skip-conda'], check=True)
+    try:
+        subprocess.run([sys.executable, 'install.py', '--onnxruntime', 'cuda@12', '--skip-conda'], cwd=program_dir, check=True)
+    except Exception:
+        subprocess.run([sys.executable, 'install.py', 'default', '--skip-conda'], cwd=program_dir, check=True)
 
 # Vá default.py để bật share=True nếu có
 for root, dirs, files in os.walk(program_dir):
@@ -65,7 +68,7 @@ for root, dirs, files in os.walk(program_dir):
                     wf.write(txt)
 
 # 4. Khởi động Cloudflare Tunnel & WebUI
-print("\n🌐 [4/4] Khởi động WebUI và tạo link truy cập...")
+print("\n🌐 [4/4] Khởi động WebUI và tạo link truy cập...", flush=True)
 subprocess.run(['curl', '-LOs', 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb'])
 subprocess.run(['dpkg', '-i', 'cloudflared-linux-amd64.deb'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 subprocess.Popen(['nohup', 'cloudflared', 'tunnel', '--url', 'localhost:7860'], stdout=open('/content/cloudflared.log', 'w'), stderr=subprocess.STDOUT)
@@ -79,11 +82,11 @@ if os.path.exists("/content/cloudflared.log"):
         if matches:
             cf_link = matches[0]
 
-print("\n" + "=" * 65)
-print("🎉 MEDIA FUSION STUDIO ĐANG HOẠT ĐỘNG!")
+print("\n" + "=" * 65, flush=True)
+print("🎉 MEDIA FUSION STUDIO ĐANG HOẠT ĐỘNG!", flush=True)
 if cf_link:
-    print(f"🔗 LINK CLOUDFLARE (TRUY CẬP NGAY): {cf_link}")
-print("🔗 LINK GRADIO LIVE SẼ XUẤT HIỆN NGAY BÊN DƯỚI:")
-print("=" * 65 + "\n")
+    print(f"🔗 LINK CLOUDFLARE (TRUY CẬP NGAY): {cf_link}", flush=True)
+print("🔗 LINK GRADIO LIVE SẼ XUẤT HIỆN NGAY BÊN DƯỚI:", flush=True)
+print("=" * 65 + "\n", flush=True)
 
-subprocess.run([sys.executable, 'run.py', 'run', '--execution-providers', 'cuda', '--output-path', output_drive_dir, '--open-browser'])
+subprocess.run([sys.executable, 'run.py', 'run', '--execution-providers', 'cuda', '--output-path', output_drive_dir, '--open-browser'], cwd=program_dir)
