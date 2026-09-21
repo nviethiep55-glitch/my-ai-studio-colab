@@ -62,6 +62,8 @@ ensure_pkg("onnxruntime-gpu", "onnxruntime")
 ensure_pkg("colorama")
 ensure_pkg("ffmpeg-python", "ffmpeg")
 ensure_pkg("huggingface_hub")
+ensure_pkg("cython")
+ensure_pkg("setuptools")
 
 # Vá lỗi PyTorch 2.6 toàn cục
 import site
@@ -79,6 +81,19 @@ torch.load = _safe_torch_load
 
 subprocess.run(['git', 'checkout', 'src/utils/helper.py'], stderr=subprocess.DEVNULL)
 
+# Vá lỗi import mesh_core_cython (không dùng trong LivePortrait 2D pipeline)
+mesh_init_file = '/content/LivePortrait/src/utils/dependencies/insightface/thirdparty/face3d/mesh/__init__.py'
+if os.path.exists(mesh_init_file):
+    with open(mesh_init_file, 'r', encoding='utf-8') as f:
+        mesh_init_code = f.read()
+    if 'from .cython import mesh_core_cython' in mesh_init_code and 'try:' not in mesh_init_code:
+        mesh_init_code = mesh_init_code.replace(
+            'from .cython import mesh_core_cython',
+            'try:\n    from .cython import mesh_core_cython\nexcept Exception:\n    mesh_core_cython = None'
+        )
+        with open(mesh_init_file, 'w', encoding='utf-8') as f:
+            f.write(mesh_init_code)
+
 # Nạp weights từ Drive Cache
 drive_weights_dir = os.path.join(base_dir, "pretrained_weights")
 if os.path.exists(drive_weights_dir) and os.path.exists(os.path.join(drive_weights_dir, "liveportrait/base_models/appearance_feature_extractor.pth")):
@@ -95,11 +110,18 @@ else:
             os.makedirs(drive_weights_dir, exist_ok=True)
             shutil.copytree('/content/LivePortrait/pretrained_weights', drive_weights_dir, dirs_exist_ok=True)
 
-# Biên dịch Cython
+# Biên dịch Cython nếu có thể
 mesh_cython_dir = '/content/LivePortrait/src/utils/dependencies/insightface/thirdparty/face3d/mesh/cython'
-if not glob.glob(os.path.join(mesh_cython_dir, '*.so')):
+if os.path.exists(mesh_cython_dir):
     os.chdir(mesh_cython_dir)
-    subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], check=True)
+    for old_f in glob.glob('*.so') + glob.glob('mesh_core_cython.cpp') + glob.glob('mesh_core_cython.c'):
+        try: os.remove(old_f)
+        except Exception: pass
+    shutil.rmtree('build', ignore_errors=True)
+    try:
+        subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], capture_output=True, timeout=60)
+    except Exception:
+        pass
 
 # Luôn quay về thư mục gốc LivePortrait
 os.chdir('/content/LivePortrait')
