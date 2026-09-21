@@ -53,8 +53,10 @@ def ensure_pkg(pkg_name, import_name=None):
     try:
         __import__(import_name)
     except ImportError:
-        subprocess.run([sys.executable, "-m", "pip", "install", pkg_name], check=True)
+        print(f"  ⏳ Đang cài đặt thư viện {pkg_name}...", flush=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", pkg_name], check=True)
 
+print("  ⏳ Đang kiểm tra các gói thư viện phụ thuộc...", flush=True)
 ensure_pkg("tyro")
 ensure_pkg("gradio")
 ensure_pkg("onnx")
@@ -64,8 +66,19 @@ ensure_pkg("ffmpeg-python", "ffmpeg")
 ensure_pkg("huggingface_hub")
 ensure_pkg("cython")
 ensure_pkg("setuptools")
+print("  ✓ Các gói thư viện phụ thuộc đã sẵn sàng!", flush=True)
 
-# Vá lỗi PyTorch 2.6 toàn cục
+# Vá lỗi PyTorch 2.6 trong tiến trình hiện tại và toàn cục
+try:
+    import torch
+    _old_torch_load = torch.load
+    def _safe_torch_load(*args, **kwargs):
+        kwargs['weights_only'] = False
+        return _old_torch_load(*args, **kwargs)
+    torch.load = _safe_torch_load
+except Exception:
+    pass
+
 import site
 for p in site.getsitepackages():
     sc_file = os.path.join(p, 'sitecustomize.py')
@@ -131,7 +144,7 @@ if not all_local_valid:
         snapshot_download(repo_id='camenduru/LivePortrait', local_dir='/content/LivePortrait/pretrained_weights', local_dir_use_symlinks=False)
         if has_drive:
             print("  💾 Đang lưu bản sao trọng số hoàn chỉnh vào Google Drive để lần sau nạp ngay...", flush=True)
-            os.makedirs(drive_cache_dir, exist_ok=True)
+            os.makedirs(base_dir, exist_ok=True)
             shutil.copytree('/content/LivePortrait/pretrained_weights', drive_weights_dir, dirs_exist_ok=True)
 
 # Biên dịch Cython nếu có thể
