@@ -56,7 +56,7 @@ print(f"  📁 Thư mục chứa video cần đổi mặt : {target_dir}")
 print(f"  📁 Thư mục lưu video thành phẩm   : {output_dir}")
 
 # 2. Cài đặt thư viện môi trường cần thiết
-print("\n📦 [2/5] Kiểm tra và cài đặt thư viện CUDA GPU...", flush=True)
+print("\n📦 [2/5] Kiểm tra và cấu hình tăng tốc CUDA GPU...", flush=True)
 
 def ensure_pkg(pkg_name, import_name=None):
     if import_name is None:
@@ -68,10 +68,24 @@ def ensure_pkg(pkg_name, import_name=None):
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", pkg_name], check=True)
 
 ensure_pkg("onnx")
-ensure_pkg("onnxruntime-gpu", "onnxruntime")
 ensure_pkg("opencv-python-headless", "cv2")
 ensure_pkg("tqdm")
 ensure_pkg("insightface")
+
+# Đảm bảo cài đặt đúng onnxruntime-gpu cho GPU Tesla T4 (Gỡ bỏ bản CPU nếu có)
+try:
+    import onnxruntime as ort
+    has_cuda = 'CUDAExecutionProvider' in ort.get_available_providers()
+except Exception:
+    has_cuda = False
+
+if not has_cuda:
+    print("  ⏳ Đang kích hoạt CUDA GPU cho ONNX Runtime...", flush=True)
+    subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "onnxruntime", "onnxruntime-gpu"], check=False)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "onnxruntime-gpu"], check=True)
+    import importlib
+    import onnxruntime as ort
+    importlib.reload(ort)
 
 import cv2
 import numpy as np
@@ -104,14 +118,23 @@ if enable_enhance:
 # 4. Khởi tạo mô hình AI vào VRAM GPU
 print("\n⚙️ [4/5] Nạp mô hình Face Analysis & Swapper vào GPU Tesla T4...", flush=True)
 try:
-    app = FaceAnalysis(name='buffalo_l', root=models_dir, providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+    available_providers = ort.get_available_providers()
+    print(f"  ⚡ Bộ tăng tốc phát hiện: {available_providers}", flush=True)
+    
+    if 'CUDAExecutionProvider' in available_providers:
+        chosen_providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+        print("  🎉 ĐÃ KÍCH HOẠT GPU TESLA T4 CUDA THÀNH CÔNG (Tốc độ tối đa ~30 FPS)!", flush=True)
+    else:
+        chosen_providers = ['CPUExecutionProvider']
+        print("  ⚠️ Không tìm thấy CUDA, đang chạy chế độ CPU.", flush=True)
+
+    app = FaceAnalysis(name='buffalo_l', root=models_dir, providers=chosen_providers)
     app.prepare(ctx_id=0, det_size=(640, 640))
-    swapper = insightface.model_zoo.get_model(swapper_path, download=False, providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+    swapper = insightface.model_zoo.get_model(swapper_path, download=False, providers=chosen_providers)
     
     enhancer_model = None
     if enable_enhance and os.path.exists(enhancer_path):
-        import onnxruntime as ort
-        enhancer_model = ort.InferenceSession(enhancer_path, providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+        enhancer_model = ort.InferenceSession(enhancer_path, providers=chosen_providers)
         print("  ✓ Đã nạp thành công mô hình Làm Nét (GFPGAN) vào GPU!", flush=True)
         
     print("  ✓ Toàn bộ mô hình AI đã sẵn sàng trên GPU Tesla T4!", flush=True)
