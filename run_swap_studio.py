@@ -47,8 +47,10 @@ else:
 
 # 3. Cài đặt thư viện môi trường
 print("\n📦 [3/4] Cài đặt thư viện và cấu hình CUDA...")
-os.chdir(program_dir)
-subprocess.run([sys.executable, 'install.py', '--onnxruntime', 'cuda', '--skip-conda'], check=True)
+try:
+    subprocess.run([sys.executable, 'install.py', '--onnxruntime', 'cuda@12', '--skip-conda'], check=True)
+except Exception:
+    subprocess.run([sys.executable, 'install.py', '--onnxruntime', 'default', '--skip-conda'], check=True)
 
 # Vá default.py để bật share=True nếu có
 for root, dirs, files in os.walk(program_dir):
