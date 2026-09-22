@@ -94,13 +94,12 @@ try:
     if hasattr(ort, "preload_dlls"):
         ort.preload_dlls()
 except ImportError:
-    print("⚠️ [Colab Worker] onnxruntime chưa có trong môi trường, đang nạp tự động...", flush=True)
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "onnxruntime-gpu"], check=False)
+    print("⚠️ [Colab Worker] onnxruntime-gpu chưa có, đang nạp tự động...", flush=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "onnxruntime-gpu"], check=False)
     try:
         import onnxruntime as ort
-    except ImportError:
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "onnxruntime"], check=False)
-        import onnxruntime as ort
+    except Exception as e:
+        print(f"⚠️ Lỗi nạp onnxruntime-gpu: {e}", flush=True)
 except Exception:
     pass
 
@@ -319,19 +318,19 @@ def get_enhancer(model_type="gfpgan"):
     )
 
     if os.path.exists(enhancer_path) and os.path.getsize(enhancer_path) > 10000:
-        providers = [('CUDAExecutionProvider', {'device_id': 0}), 'CPUExecutionProvider']
+        available_providers = []
+        try:
+            available_providers = ort.get_available_providers()
+        except Exception:
+            pass
+        if 'CUDAExecutionProvider' in available_providers:
+            providers = [('CUDAExecutionProvider', {'device_id': 0}), 'CPUExecutionProvider']
+        else:
+            providers = ['CPUExecutionProvider']
         try:
             enhancer = ort.InferenceSession(enhancer_path, providers=providers)
-            print("✨ [Colab Worker] Đã kích hoạt bộ làm nét GFPGAN v1.4!", flush=True)
-        except Exception as e:
-            print(f"⚠️ Không thể khởi tạo Enhancer: {e}", flush=True)
-    return enhancer
-
-    if os.path.exists(enhancer_path) and os.path.getsize(enhancer_path) > 10000:
-        providers = [('CUDAExecutionProvider', {'device_id': 0}), 'CPUExecutionProvider']
-        try:
-            enhancer = ort.InferenceSession(enhancer_path, providers=providers)
-            print("✨ [Colab Worker] Đã kích hoạt bộ làm nét GFPGAN v1.4!", flush=True)
+            active_list = enhancer.get_providers()
+            print(f"✨ [Colab Worker] Đã kích hoạt bộ làm nét GFPGAN v1.4 (Providers: {active_list})!", flush=True)
         except Exception as e:
             print(f"⚠️ Không thể khởi tạo Enhancer: {e}", flush=True)
     return enhancer
@@ -714,7 +713,7 @@ def get_progress():
     return current_progress
 
 @app.post("/swap")
-async def process_face_swap(
+def process_face_swap(
     source_image: UploadFile = File(...),
     target_video: UploadFile = File(...),
     target_ref_image: Optional[UploadFile] = File(None),
@@ -915,6 +914,10 @@ async def process_face_swap(
 
 def run_server(port: int = 8000):
     init_models()
+    try:
+        get_enhancer("gfpgan")
+    except Exception:
+        pass
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
 
 if __name__ == "__main__":
