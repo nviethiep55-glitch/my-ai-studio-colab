@@ -32,16 +32,23 @@ parser.add_argument("--enhance", type=str, default="false", help="Bật làm né
 parser.add_argument("--enhancer", type=str, default="gfpgan", help="Mô hình làm nét")
 parser.add_argument("--selector", type=str, default="largest", help="Chế độ chọn mặt khi không có ảnh mẫu: largest hoặc all")
 parser.add_argument("--speed", type=str, default="turbo", help="Chế độ tốc độ: turbo hoặc standard")
+parser.add_argument("--mask_blur", type=float, default=0.18, help="Độ làm mềm viền mặt (0.05 - 0.30)")
+parser.add_argument("--blend", type=float, default=0.80, help="Độ hòa trộn làm nét mặt (0.4 - 1.0)")
+parser.add_argument("--crf", type=int, default=18, help="Chất lượng nén video CRF (16 - 24)")
 args = parser.parse_args()
 
 enable_enhance = args.enhance.lower() in ("true", "1", "yes")
 enhancer_type = args.enhancer.lower()
 selector_mode = args.selector.lower()
 is_turbo = args.speed.lower() == "turbo"
+mask_blur_val = args.mask_blur
+enhancer_blend = args.blend
+video_crf = args.crf
 
 print(f"\n⚙️ CẤU HÌNH ĐANG CHẠY:")
 print(f"  • Chế độ tăng tốc GPU              : {'🔥 TURBO KỊCH KHUNG (Đa luồng ~35-40 FPS)' if is_turbo else 'TIÊU CHUẨN (~20 FPS)'}")
 print(f"  • Làm nét khuôn mặt (Face Enhancer): {'BẬT (Nét căng chuẩn HD/4K)' if enable_enhance else 'TẮT (Tốc độ tối đa ~7 phút/15k frame)'}")
+print(f"  • Hòa trộn viền mềm (Mask Blur)    : {int(mask_blur_val * 100)}% (Tiệp da cổ & trán)")
 
 # 1. Kết nối Google Drive
 print("\n🔗 [1/5] Kiểm tra kết nối Google Drive...")
@@ -131,7 +138,7 @@ enhancer_path = os.path.join(models_dir, "gfpgan_1.4.onnx")
 if enable_enhance:
     if not os.path.exists(enhancer_path) or os.path.getsize(enhancer_path) < 100000000:
         print("  ⏳ Đang tải mô hình GFPGAN Làm Nét (~332MB) về Google Drive...", flush=True)
-        enhancer_url = "https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/gfpgan_1.4.onnx"
+        enhancer_url = "https://huggingface.co/facefusion/models-3.0.0/resolve/main/gfpgan_1.4.onnx"
         subprocess.run(['curl', '-L', enhancer_url, '-o', enhancer_path], check=True)
         print("  ✓ Đã lưu GFPGAN vào Google Drive!", flush=True)
     else:
@@ -175,6 +182,65 @@ except Exception as e:
 # Hàm tính độ tương đồng Cosine giữa 2 vector khuôn mặt
 def compute_sim(emb1, emb2):
     return float(np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2) + 1e-6))
+
+def paste_back_seamless(target_img, bgr_fake, M, mask_blur_pct=0.18):
+    """
+    Seamless feather paste-back with elliptical soft mask.
+    Triệt tiêu hoàn toàn viền cắt dán cứng, hòa trộn tự nhiên vào da cổ/trán.
+    """
+    h, w = bgr_fake.shape[:2]
+    mask = np.zeros((h, w), dtype=np.float32)
+    cv2.ellipse(mask, (w // 2, h // 2), (int(w * 0.44), int(h * 0.47)), 0, 0, 360, 1.0, -1)
+    
+    ksize = max(3, int(w * mask_blur_pct) | 1)
+    mask = cv2.GaussianBlur(mask, (ksize, ksize), 0)
+    
+    IM = cv2.invertAffineTransform(M)
+    warped_fake = cv2.warpAffine(bgr_fake, IM, (target_img.shape[1], target_img.shape[0]), borderMode=cv2.BORDER_CONSTANT)
+    warped_mask = cv2.warpAffine(mask, IM, (target_img.shape[1], target_img.shape[0]), borderMode=cv2.BORDER_CONSTANT)
+    warped_mask = np.clip(warped_mask, 0.0, 1.0)[:, :, np.newaxis]
+    
+    return (warped_fake * warped_mask + target_img * (1.0 - warped_mask)).astype(np.uint8)
+
+def enhance_face(enhancer_sess, face_bgr, blend=0.8):
+    if enhancer_sess is None:
+        return face_bgr
+    try:
+        orig_h, orig_w = face_bgr.shape[:2]
+        inp = cv2.resize(face_bgr, (512, 512))
+        inp = inp.astype(np.float32) / 255.0
+        inp = inp[:, :, ::-1]  # BGR to RGB
+        inp = (inp - 0.5) / 0.5  # [-1, 1]
+        inp = np.transpose(inp, (2, 0, 1))
+        inp = np.expand_dims(inp, axis=0)
+
+        in_name = enhancer_sess.get_inputs()[0].name
+        out_name = enhancer_sess.get_outputs()[0].name
+        out = enhancer_sess.run([out_name], {in_name: inp})[0][0]
+
+        out = np.clip((out + 1.0) / 2.0, 0.0, 1.0)
+        out = np.transpose(out, (1, 2, 0))
+        out = (out[:, :, ::-1] * 255.0).astype(np.uint8)
+        out = cv2.resize(out, (orig_w, orig_h))
+
+        if blend < 1.0:
+            out = cv2.addWeighted(out, blend, face_bgr, 1.0 - blend, 0)
+        return out
+    except Exception:
+        return face_bgr
+
+def perform_face_swap(frame, target_face, source_face):
+    """
+    Hoán đổi khuôn mặt với viền mềm tiệp da và làm nét GFPGAN nếu được bật.
+    Tự động fallback về paste_back nguyên bản nếu có lỗi.
+    """
+    try:
+        bgr_fake, M = swapper.get(frame, target_face, source_face, paste_back=False)
+        if enhancer_model is not None:
+            bgr_fake = enhance_face(enhancer_model, bgr_fake, blend=enhancer_blend)
+        return paste_back_seamless(frame, bgr_fake, M, mask_blur_pct=mask_blur_val)
+    except Exception:
+        return swapper.get(frame, target_face, source_face, paste_back=True)
 
 # 5. Quét ảnh khuôn mặt & Thiết lập cặp hoán đổi thông minh
 image_exts = ('*.jpg', '*.jpeg', '*.png', '*.webp', '*.JPG', '*.PNG')
@@ -346,24 +412,15 @@ def process_video_pipeline(v_path, final_out):
                         # Ngưỡng chuẩn xác cùng 1 người (0.40)
                         if best_idx >= 0 and best_sim >= 0.40:
                             used_indices.add(best_idx)
-                            try:
-                                frame = swapper.get(frame, target_faces[best_idx], pair['source_face'], paste_back=True)
-                            except Exception:
-                                pass
+                            frame = perform_face_swap(frame, target_faces[best_idx], pair['source_face'])
                 else:
                     # Chế độ TỰ ĐỘNG khi không có ảnh mẫu người trong clip
                     if selector_mode == "all":
                         for tf in target_faces:
-                            try:
-                                frame = swapper.get(frame, tf, default_source_face, paste_back=True)
-                            except Exception:
-                                pass
+                            frame = perform_face_swap(frame, tf, default_source_face)
                     else:
                         main_target = sorted(target_faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]), reverse=True)[0]
-                        try:
-                            frame = swapper.get(frame, main_target, default_source_face, paste_back=True)
-                        except Exception:
-                            pass
+                        frame = perform_face_swap(frame, main_target, default_source_face)
         except Exception:
             pass
             
@@ -378,9 +435,9 @@ def process_video_pipeline(v_path, final_out):
     # Ghép âm thanh nguyên gốc vào video mới
     subprocess.run(['ffmpeg', '-y', '-i', v_path, '-vn', '-acodec', 'copy', temp_audio], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if os.path.exists(temp_audio) and os.path.getsize(temp_audio) > 1000:
-        subprocess.run(['ffmpeg', '-y', '-i', temp_raw, '-i', temp_audio, '-c:v', 'libx264', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', final_out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['ffmpeg', '-y', '-i', temp_raw, '-i', temp_audio, '-c:v', 'libx264', '-crf', str(video_crf), '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', final_out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
-        subprocess.run(['ffmpeg', '-y', '-i', temp_raw, '-c:v', 'libx264', '-preset', 'fast', '-pix_fmt', 'yuv420p', final_out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['ffmpeg', '-y', '-i', temp_raw, '-c:v', 'libx264', '-crf', str(video_crf), '-preset', 'fast', '-pix_fmt', 'yuv420p', final_out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
     if os.path.exists(temp_raw):
         try: os.remove(temp_raw)
