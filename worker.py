@@ -882,15 +882,16 @@ def process_face_swap(
         current_progress["status"] = "encoding"
         current_progress["current_frame"] = total_frames
 
-        # Merge original audio back using FFmpeg (fast NVENC or ultrafast CPU)
+        # Merge original audio back using FFmpeg (fast NVENC or efficient CPU)
         final_out = os.path.join(tmp_dir, "final_swapped.mp4")
+        out_crf = max(20, min(28, int(video_crf))) if video_crf else 23
         cmd_nvenc = [
             "ffmpeg", "-y",
             "-i", temp_raw_out,
             "-i", vid_in_path,
             "-c:v", "h264_nvenc",
             "-preset", "p4",
-            "-cq", str(video_crf),
+            "-cq", str(out_crf),
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-map", "0:v:0",
@@ -905,8 +906,8 @@ def process_face_swap(
                 "-i", temp_raw_out,
                 "-i", vid_in_path,
                 "-c:v", "libx264",
-                "-crf", str(video_crf),
-                "-preset", "ultrafast",
+                "-crf", str(out_crf),
+                "-preset", "veryfast",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac",
                 "-map", "0:v:0",
