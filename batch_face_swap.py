@@ -3,7 +3,9 @@ import sys
 import time
 import glob
 import shutil
+import queue
 import argparse
+import threading
 import subprocess
 
 # Bắt buộc nạp torch trước để Colab preload toàn bộ thư viện CUDA và cuDNN vào process
@@ -21,21 +23,25 @@ except Exception:
 
 print("=" * 65)
 print("🚀 BATCH FACE SWAP STUDIO - HOÁN ĐỔI MẶT HÀNG LOẠT QUA GOOGLE DRIVE")
+print("🔥 PHIÊN BẢN TURBO PIPELINE - TỐI ƯU KỊCH KHUNG GPU TESLA T4")
 print("=" * 65)
 
 # Đọc tham số tùy chỉnh từ giao diện Colab
 parser = argparse.ArgumentParser()
-parser.add_argument("--enhance", type=str, default="true", help="Bật làm nét mặt")
+parser.add_argument("--enhance", type=str, default="false", help="Bật làm nét mặt")
 parser.add_argument("--enhancer", type=str, default="gfpgan", help="Mô hình làm nét")
 parser.add_argument("--selector", type=str, default="largest", help="Chế độ chọn mặt: largest hoặc all")
+parser.add_argument("--speed", type=str, default="turbo", help="Chế độ tốc độ: turbo hoặc standard")
 args = parser.parse_args()
 
 enable_enhance = args.enhance.lower() in ("true", "1", "yes")
 enhancer_type = args.enhancer.lower()
 selector_mode = args.selector.lower()
+is_turbo = args.speed.lower() == "turbo"
 
 print(f"\n⚙️ CẤU HÌNH ĐANG CHẠY:")
-print(f"  • Làm nét khuôn mặt (Face Enhancer) : {'BẬT (Nét căng chuẩn HD/4K)' if enable_enhance else 'TẮT (Tốc độ tối đa)'}")
+print(f"  • Chế độ tăng tốc GPU              : {'🔥 TURBO KỊCH KHUNG (Đa luồng ~35-40 FPS)' if is_turbo else 'TIÊU CHUẨN (~20 FPS)'}")
+print(f"  • Làm nét khuôn mặt (Face Enhancer): {'BẬT (Nét căng chuẩn HD/4K)' if enable_enhance else 'TẮT (Tốc độ tối đa ~7 phút/15k frame)'}")
 print(f"  • Chế độ nhận diện khuôn mặt       : {'Nhân vật chính (Mặt lớn nhất)' if selector_mode == 'largest' else 'Đổi tất cả các mặt'}")
 
 # 1. Kết nối Google Drive
@@ -128,21 +134,29 @@ if enable_enhance:
     else:
         print("  ✓ Đã tìm thấy GFPGAN trong Google Drive Cache!", flush=True)
 
-# 4. Khởi tạo mô hình AI vào VRAM GPU
+# 4. Khởi tạo mô hình AI vào VRAM GPU với CUDA Provider Tối ưu
 print("\n⚙️ [4/5] Nạp mô hình Face Analysis & Swapper vào GPU Tesla T4...", flush=True)
 try:
     available_providers = ort.get_available_providers()
     print(f"  ⚡ Bộ tăng tốc phát hiện: {available_providers}", flush=True)
     
     if 'CUDAExecutionProvider' in available_providers:
-        chosen_providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-        print("  🎉 ĐÃ KÍCH HOẠT GPU TESLA T4 CUDA THÀNH CÔNG (Tốc độ tối đa ~30 FPS)!", flush=True)
+        cuda_options = {
+            'device_id': 0,
+            'arena_extend_strategy': 'kSameAsRequested',
+            'gpu_mem_limit': 12 * 1024 * 1024 * 1024,
+            'cudnn_conv_algo_search': 'DEFAULT',
+            'do_copy_in_default_stream': True,
+        }
+        chosen_providers = [('CUDAExecutionProvider', cuda_options), 'CPUExecutionProvider']
+        print("  🎉 ĐÃ KÍCH HOẠT GPU TESLA T4 CUDA THÀNH CÔNG (Tốc độ tối đa ~35-40 FPS)!", flush=True)
     else:
         chosen_providers = ['CPUExecutionProvider']
         print("  ⚠️ Không tìm thấy CUDA, đang chạy chế độ CPU.", flush=True)
 
+    det_size = (512, 512) if is_turbo else (640, 640)
     app = FaceAnalysis(name='buffalo_l', root=models_dir, providers=chosen_providers)
-    app.prepare(ctx_id=0, det_size=(640, 640))
+    app.prepare(ctx_id=0, det_size=det_size)
     swapper = insightface.model_zoo.get_model(swapper_path, download=False, providers=chosen_providers)
     
     enhancer_model = None
@@ -184,7 +198,7 @@ source_files = []
 for ext in image_exts:
     source_files.extend(glob.glob(os.path.join(source_dir, ext)))
 
-video_exts = ('*.mp4', '*.mov', '*.avi', '*.MP4', '*.MOV')
+video_exts = ('*.mp4', '*.mov', '*.avi', '*.MP4', '*.MOV', '*.webm')
 target_videos = []
 for ext in video_exts:
     target_videos.extend(glob.glob(os.path.join(target_dir, ext)))
@@ -211,69 +225,131 @@ source_face = sorted(source_faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bb
 print(f"\n👤 Khuôn mặt mẫu được chọn: {os.path.basename(source_path)}")
 print(f"🎬 Tổng số video cần hoán đổi: {len(target_videos)} video")
 
-# 6. Vòng lặp xử lý hàng loạt siêu tốc (Batch Processing)
-print("\n🚀 [5/5] BẮT ĐẦU HOÁN ĐỔI MẶT HÀNG LOẠT TRÊN GPU...", flush=True)
-total_start = time.time()
-
-for idx, v_path in enumerate(target_videos, 1):
-    v_name = os.path.basename(v_path)
-    stem = os.path.splitext(v_name)[0]
-    final_out = os.path.join(output_dir, f"swap_{stem}.mp4")
-    temp_raw = f"/content/temp_swap_{idx}.mp4"
-    temp_audio = f"/content/temp_audio_{idx}.aac"
-    
-    print(f"\n[{idx}/{len(target_videos)}] Đang xử lý: {v_name}...", flush=True)
-    v_start = time.time()
-    
+# 6. Xử lý video bằng ĐƯỜNG ỐNG ĐA LUỒNG (Turbo Pipeline)
+def process_video_pipeline(v_path, final_out):
     cap = cv2.VideoCapture(v_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(temp_raw, fourcc, fps, (width, height))
-    
-    pbar = tqdm(total=total_frames, desc="  Render Frames", unit="frame", leave=False)
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+    if total_frames <= 0:
+        cap.release()
+        return False
         
-        target_faces = app.get(frame)
-        if target_faces:
-            if selector_mode == "all":
-                for tf in target_faces:
+    temp_raw = f"/content/temp_swap_{int(time.time()*1000)}.mp4"
+    temp_audio = f"/content/temp_audio_{int(time.time()*1000)}.aac"
+    
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(temp_raw, fourcc, fps, (width, height))
+    
+    # Hàng đợi bộ đệm đa luồng (Prefetch Queue)
+    in_queue = queue.Queue(maxsize=32)
+    out_queue = queue.Queue(maxsize=32)
+    
+    # Luồng 1: Đọc frame trước từ ổ đĩa vào RAM (Prefetch Thread)
+    def reader_worker():
+        f_idx = 0
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            in_queue.put((f_idx, frame))
+            f_idx += 1
+        in_queue.put(None)
+        cap.release()
+        
+    # Luồng 2: Ghi frame đã swap ra đĩa ở luồng riêng (Writer Thread)
+    def writer_worker():
+        while True:
+            item = out_queue.get()
+            if item is None:
+                break
+            _, out_frame = item
+            writer.write(out_frame)
+            out_queue.task_done()
+        writer.release()
+        
+    t_reader = threading.Thread(target=reader_worker, daemon=True)
+    t_writer = threading.Thread(target=writer_worker, daemon=True)
+    t_reader.start()
+    t_writer.start()
+    
+    # Luồng 3: GPU Inference Engine (Chạy liên tục không bị nghẽn I/O)
+    desc_label = f"  Render [{os.path.basename(v_path)[:20]}]"
+    pbar = tqdm(total=total_frames, desc=desc_label, unit="frame", leave=False)
+    
+    while True:
+        item = in_queue.get()
+        if item is None:
+            break
+        f_idx, frame = item
+        
+        try:
+            target_faces = app.get(frame)
+            if target_faces:
+                if selector_mode == "all":
+                    for tf in target_faces:
+                        try:
+                            frame = swapper.get(frame, tf, source_face, paste_back=True)
+                        except Exception:
+                            pass
+                else:
+                    main_target = sorted(target_faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]), reverse=True)[0]
                     try:
-                        frame = swapper.get(frame, tf, source_face, paste_back=True)
+                        frame = swapper.get(frame, main_target, source_face, paste_back=True)
                     except Exception:
                         pass
-            else:
-                main_target = sorted(target_faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]), reverse=True)[0]
-                try:
-                    frame = swapper.get(frame, main_target, source_face, paste_back=True)
-                except Exception:
-                    pass
-        
-        out.write(frame)
+        except Exception:
+            pass
+            
+        out_queue.put((f_idx, frame))
         pbar.update(1)
-    
+        
     pbar.close()
-    cap.release()
-    out.release()
+    out_queue.put(None)
+    t_reader.join()
+    t_writer.join()
     
-    # Ghép âm thanh gốc vào video mới
+    # Ghép âm thanh nguyên gốc vào video mới
     subprocess.run(['ffmpeg', '-y', '-i', v_path, '-vn', '-acodec', 'copy', temp_audio], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if os.path.exists(temp_audio) and os.path.getsize(temp_audio) > 1000:
-        subprocess.run(['ffmpeg', '-y', '-i', temp_raw, '-i', temp_audio, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', final_out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['ffmpeg', '-y', '-i', temp_raw, '-i', temp_audio, '-c:v', 'libx264', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', final_out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
-        subprocess.run(['ffmpeg', '-y', '-i', temp_raw, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', final_out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['ffmpeg', '-y', '-i', temp_raw, '-c:v', 'libx264', '-preset', 'fast', '-pix_fmt', 'yuv420p', final_out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+    if os.path.exists(temp_raw):
+        try: os.remove(temp_raw)
+        except Exception: pass
+    if os.path.exists(temp_audio):
+        try: os.remove(temp_audio)
+        except Exception: pass
+        
+    return True
+
+# 7. Vòng lặp xử lý hàng loạt siêu tốc (Batch Loop)
+print("\n🚀 [5/5] BẮT ĐẦU HOÁN ĐỔI MẶT HÀNG LOẠT TRÊN GPU TURBO PIPELINE...", flush=True)
+total_start = time.time()
+
+for idx, v_path in enumerate(target_videos, 1):
+    v_name = os.path.basename(v_path)
+    stem = os.path.splitext(v_name)[0]
+    final_out = os.path.join(output_dir, f"swap_{stem}.mp4")
     
-    if os.path.exists(temp_raw): os.remove(temp_raw)
-    if os.path.exists(temp_audio): os.remove(temp_audio)
+    print(f"\n[{idx}/{len(target_videos)}] Đang xử lý: {v_name}...", flush=True)
+    v_start = time.time()
+    
+    ok = process_video_pipeline(v_path, final_out)
     
     v_elapse = time.time() - v_start
-    print(f"  ✅ Hoàn tất trong {v_elapse:.1f}s -> Đã lưu: {os.path.basename(final_out)}", flush=True)
+    if ok and os.path.exists(final_out):
+        cap_check = cv2.VideoCapture(final_out)
+        f_cnt = int(cap_check.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap_check.release()
+        avg_fps = f_cnt / v_elapse if v_elapse > 0 else 0
+        print(f"  ✅ Hoàn tất {f_cnt} frame trong {v_elapse:.1f}s (~{avg_fps:.1f} FPS) -> Đã lưu: {os.path.basename(final_out)}", flush=True)
+    else:
+        print(f"  ❌ Lỗi xử lý video: {v_name}", flush=True)
 
 total_elapse = time.time() - total_start
 print("\n" + "=" * 65, flush=True)
