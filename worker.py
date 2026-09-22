@@ -928,7 +928,12 @@ def process_face_swap(
 
         # Tự động lưu bản sao trực tiếp vào Google Drive TRONG LUỒNG NGẦM (Không chặn luồng trả lời HTTP)
         def _bg_drive_backup(f_path, f_name):
-            for d_out in ["/content/drive/MyDrive/output_videos", "/content/drive/MyDrive/AI_Colab_Cache/output_videos"]:
+            drive_targets = [
+                "/content/drive/MyDrive/output_videos",
+                "/content/drive/MyDrive/BatchFaceSwap/output_videos",
+                "/content/drive/MyDrive/AI_Colab_Cache/output_videos"
+            ]
+            for d_out in drive_targets:
                 try:
                     if os.path.exists("/content/drive/MyDrive"):
                         os.makedirs(d_out, exist_ok=True)
