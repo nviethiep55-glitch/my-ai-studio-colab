@@ -801,8 +801,10 @@ def process_face_swap(
                     continue
             out_writer.release()
 
-        threading.Thread(target=reader_worker, daemon=True).start()
-        threading.Thread(target=writer_worker, daemon=True).start()
+        t_reader = threading.Thread(target=reader_worker, daemon=True)
+        t_writer = threading.Thread(target=writer_worker, daemon=True)
+        t_reader.start()
+        t_writer.start()
 
         start_time = time.time()
         processed = 0
@@ -854,10 +856,14 @@ def process_face_swap(
                 cur_fps = round(processed / elapsed, 1)
                 current_progress["current_frame"] = processed
                 current_progress["fps"] = cur_fps
+                current_progress["status"] = "processing"
 
         swap_done.set()
-        while not write_queue.empty():
-            time.sleep(0.05)
+        t_writer.join(timeout=30)
+
+        # Cập nhật trạng thái đang ghép âm thanh
+        current_progress["status"] = "encoding"
+        current_progress["current_frame"] = total_frames
 
         # Merge original audio back using FFmpeg
         final_out = os.path.join(tmp_dir, "final_swapped.mp4")
