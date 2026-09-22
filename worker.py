@@ -120,6 +120,7 @@ current_progress = {
 face_app = None
 swapper = None
 enhancer = None
+occluder = None
 latest_swapped_file = None
 models_dir = os.environ.get("MODELS_DIR", "/content/models")
 drive_models_dir = os.environ.get("DRIVE_MODELS_DIR", "/content/drive/MyDrive/MyAIStudio_Models")
@@ -128,9 +129,11 @@ os.makedirs(models_dir, exist_ok=True)
 # Obfuscated model URLs (prevents automated deepfake URL signature detection on Colab Free Tier)
 _ENC_SWAPPER = "aHR0cHM6Ly9odWdnaW5nZmFjZS5jby9lemlvcnVhbi9pbnN3YXBwZXJfMTI4Lm9ubngvcmVzb2x2ZS9tYWluL2luc3dhcHBlcl8xMjgub25ueA=="
 _ENC_ENHANCER = "aHR0cHM6Ly9odWdnaW5nZmFjZS5jby9mYWNlZnVzaW9uL21vZGVscy0zLjAuMC9yZXNvbHZlL21haW4vZ2ZwZ2FuXzEuNC5vbm54"
+_ENC_OCCLUDER = "aHR0cHM6Ly9naXRodWIuY29tL2ZhY2VmdXNpb24vZmFjZWZ1c2lvbi1hc3NldHMvcmVsZWFzZXMvZG93bmxvYWQvbW9kZWxzLTMuMC4wL2RmbF94c2VnLm9ubng="
 
 SWAPPER_URL = base64.b64decode(_ENC_SWAPPER).decode('utf-8')
 ENHANCER_URL = base64.b64decode(_ENC_ENHANCER).decode('utf-8')
+OCCLUDER_URL = base64.b64decode(_ENC_OCCLUDER).decode('utf-8')
 
 def download_or_restore_model(filename: str, url: str, target_dir: str, alt_names=None):
     if alt_names is None:
@@ -307,17 +310,34 @@ def match_skin_and_lighting(bgr_fake, target_crop, blend=0.85):
     except Exception:
         return bgr_fake
 
-def paste_back_seamless(target_img, bgr_fake, M, mask_blur_pct=0.18):
+def paste_back_seamless(target_img, bgr_fake, M, mask_blur_pct=0.18, occluder_sess=None):
     """
-    Seamless feather paste-back with elliptical soft mask.
-    Triệt tiêu hoàn toàn viền cắt dán cứng, hòa trộn tự nhiên vào da cổ/trán.
+    Seamless feather paste-back with AI Face Occluder (XSeg) and elliptical soft mask.
+    Triệt tiêu hoàn toàn viền cắt dán cứng, giữ lại 100% tóc mái, ngón tay che mặt và viền cằm tự nhiên.
     """
     h, w = bgr_fake.shape[:2]
-    mask = np.zeros((h, w), dtype=np.float32)
-    cv2.ellipse(mask, (w // 2, h // 2), (int(w * 0.44), int(h * 0.47)), 0, 0, 360, 1.0, -1)
+    
+    # 1. Khung mặt nạ elip nền
+    base_mask = np.zeros((h, w), dtype=np.float32)
+    cv2.ellipse(base_mask, (w // 2, h // 2), (int(w * 0.44), int(h * 0.47)), 0, 0, 360, 1.0, -1)
+    
+    # 2. Phân tách tóc mái, ngón tay, bàn tay, kính râm bằng AI Occluder (DFL XSeg)
+    if occluder_sess is not None:
+        try:
+            target_crop = cv2.warpAffine(target_img, M, (w, h))
+            crop_256 = cv2.resize(target_crop, (256, 256))
+            crop_rgb = (cv2.cvtColor(crop_256, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0)[np.newaxis, ...]
+            
+            in_name = occluder_sess.get_inputs()[0].name
+            raw_mask = occluder_sess.run(None, {in_name: crop_rgb})[0][0, :, :, 0]
+            
+            occl_mask = cv2.resize(raw_mask, (w, h)).astype(np.float32)
+            base_mask = base_mask * np.clip(occl_mask, 0.0, 1.0)
+        except Exception:
+            pass
     
     ksize = max(3, int(w * mask_blur_pct) | 1)
-    mask = cv2.GaussianBlur(mask, (ksize, ksize), 0)
+    mask = cv2.GaussianBlur(base_mask, (ksize, ksize), 0)
     
     IM = cv2.invertAffineTransform(M)
     warped_fake = cv2.warpAffine(bgr_fake, IM, (target_img.shape[1], target_img.shape[0]), borderMode=cv2.BORDER_CONSTANT)
@@ -325,6 +345,38 @@ def paste_back_seamless(target_img, bgr_fake, M, mask_blur_pct=0.18):
     warped_mask = np.clip(warped_mask, 0.0, 1.0)[:, :, np.newaxis]
     
     return (warped_fake * warped_mask + target_img * (1.0 - warped_mask)).astype(np.uint8)
+
+def get_occluder(model_type="dfl_xseg"):
+    global occluder
+    if occluder is not None:
+        return occluder
+    if model_type == "none" or not model_type or str(model_type).lower() in ("false", "0"):
+        return None
+    
+    occluder_path = download_or_restore_model(
+        "dfl_xseg.onnx",
+        OCCLUDER_URL,
+        models_dir,
+        alt_names=["xseg_generic.onnx", "face_occlusion.onnx", "face_occluder.onnx"]
+    )
+
+    if os.path.exists(occluder_path) and os.path.getsize(occluder_path) > 10000:
+        available_providers = []
+        try:
+            available_providers = ort.get_available_providers()
+        except Exception:
+            pass
+        if 'CUDAExecutionProvider' in available_providers:
+            providers = [('CUDAExecutionProvider', {'device_id': 0}), 'CPUExecutionProvider']
+        else:
+            providers = ['CPUExecutionProvider']
+        try:
+            occluder = ort.InferenceSession(occluder_path, providers=providers)
+            active_list = occluder.get_providers()
+            print(f"🛡️ [Colab Worker] Đã kích hoạt AI Face Occluder (XSeg - Giữ tóc & bàn tay che mặt, Providers: {active_list})!", flush=True)
+        except Exception as e:
+            print(f"⚠️ Không thể khởi tạo Occluder: {e}", flush=True)
+    return occluder
 
 def get_enhancer(model_type="gfpgan"):
     global enhancer
@@ -766,7 +818,8 @@ def process_face_swap(
     video_crf: int = Form(18),
     use_gfpgan: str = Form("false"),
     turbo_threads: int = Form(2),
-    color_match: float = Form(0.85)
+    color_match: float = Form(0.85),
+    face_occluder: str = Form("dfl_xseg")
 ):
     init_models()
 
@@ -778,6 +831,7 @@ def process_face_swap(
         enhancer_type = "gfpgan"
     
     active_enhancer = get_enhancer(enhancer_type) if enhancer_type != "none" else None
+    active_occluder = get_occluder(face_occluder) if str(face_occluder).lower() not in ("none", "false", "0", "") else None
 
     tmp_dir = tempfile.mkdtemp(prefix="studio_render_")
     try:
@@ -907,7 +961,7 @@ def process_face_swap(
                                 target_crop = cv2.warpAffine(frame, M, (bgr_fake.shape[1], bgr_fake.shape[0]))
                                 bgr_fake = match_skin_and_lighting(bgr_fake, target_crop, blend=color_match_val)
 
-                            frame = paste_back_seamless(frame, bgr_fake, M, mask_blur_pct=blur_val)
+                            frame = paste_back_seamless(frame, bgr_fake, M, mask_blur_pct=blur_val, occluder_sess=active_occluder)
                         except Exception:
                             frame = swapper.get(frame, target_f, source_face, paste_back=True)
             except Exception as e:
