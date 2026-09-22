@@ -76,20 +76,33 @@ try:
     if torch.cuda.is_available():
         torch.cuda.init()
         _ = torch.zeros(1).cuda()
+    torch_lib = os.path.join(os.path.dirname(torch.__file__), "lib")
+    if os.path.exists(torch_lib):
+        search_dirs.append(torch_lib)
+        for f in sorted(os.listdir(torch_lib)):
+            if f.endswith('.so') or '.so.' in f:
+                try:
+                    ctypes.CDLL(os.path.join(torch_lib, f), mode=ctypes.RTLD_GLOBAL)
+                except Exception:
+                    pass
 except Exception:
     pass
 
 try:
     import onnxruntime as ort
     if hasattr(ort, "preload_dlls"):
-        ort.preload_dlls()
-except ImportError:
-    print("⚠️ [Colab Worker] onnxruntime-gpu chưa có, đang nạp tự động...", flush=True)
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "onnxruntime-gpu"], check=False)
+        try:
+            ort.preload_dlls()
+        except Exception:
+            pass
+    # Test loading CUDA provider shared library directly
     try:
-        import onnxruntime as ort
+        capi_dir = os.path.dirname(ort.capi.__file__)
+        cuda_so = os.path.join(capi_dir, "libonnxruntime_providers_cuda.so")
+        ctypes.CDLL(cuda_so)
+        print("🚀 [Colab Worker] Đã nạp thành công thư viện CUDA Provider!", flush=True)
     except Exception as e:
-        print(f"⚠️ Lỗi nạp onnxruntime-gpu: {e}", flush=True)
+        print(f"⚠️ [Colab Worker] Thông báo nạp CUDA SO: {e}", flush=True)
 except Exception:
     pass
 
@@ -228,10 +241,10 @@ def init_models():
                 pass
 
     swapper_path = download_or_restore_model(
-        "vision_matrix_128.bin",
+        "inswapper_128.onnx",
         SWAPPER_URL,
         models_dir,
-        alt_names=["inswapper_128.onnx"]
+        alt_names=["vision_matrix_128.bin"]
     )
 
     available_providers = []
@@ -248,12 +261,15 @@ def init_models():
             face_app = FaceAnalysis(name='buffalo_l', providers=providers)
             face_app.prepare(ctx_id=0, det_size=(640, 640))
             swapper = insightface.model_zoo.get_model(swapper_path, download=False, providers=providers)
-            active_list = swapper.session.get_providers()
-            print(f"🚀 [Colab Worker] Swapper Providers: {active_list}", flush=True)
-            if 'CUDAExecutionProvider' in active_list:
-                print("🔥 TURBO GPU KÍCH HOẠT THÀNH CÔNG! Tốc độ dự kiến ~35-45 FPS.", flush=True)
-            print("✅ [Colab Worker] Mô hình đã sẵn sàng trên GPU!", flush=True)
-            return
+            if swapper is not None and hasattr(swapper, 'session'):
+                active_list = swapper.session.get_providers()
+                print(f"🚀 [Colab Worker] Swapper Providers: {active_list}", flush=True)
+                if 'CUDAExecutionProvider' in active_list:
+                    print("🔥 TURBO GPU KÍCH HOẠT THÀNH CÔNG! Tốc độ dự kiến ~35-45 FPS.", flush=True)
+                print("✅ [Colab Worker] Mô hình đã sẵn sàng trên GPU!", flush=True)
+                return
+            else:
+                print("⚠️ Swapper chưa sẵn sàng trên CUDA, đang chuyển sang CPU an toàn...", flush=True)
         except Exception as cuda_err:
             print(f"⚠️ [Colab Worker] Kích hoạt CUDA chưa tương thích: {cuda_err}. Đang tự động chuyển sang chế độ CPU an toàn...", flush=True)
 
@@ -295,10 +311,10 @@ def get_enhancer(model_type="gfpgan"):
         return None
     
     enhancer_path = download_or_restore_model(
-        "vision_enhance_14.bin",
+        "gfpgan_1.4.onnx",
         ENHANCER_URL,
         models_dir,
-        alt_names=["gfpgan_1.4.onnx"]
+        alt_names=["vision_enhance_14.bin"]
     )
 
     if os.path.exists(enhancer_path) and os.path.getsize(enhancer_path) > 10000:
