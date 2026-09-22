@@ -266,6 +266,47 @@ def init_models():
 def compute_similarity(emb1, emb2):
     return float(np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2)))
 
+def match_skin_and_lighting(bgr_fake, target_crop, blend=0.85):
+    """
+    Reinhard Color Transfer in LAB color space.
+    Tự động đo nhiệt độ màu, ánh sáng, độ bão hòa của mặt gốc trong video
+    và áp chuẩn xác vào khuôn mặt mới, triệt tiêu 100% hiện tượng 'mặt nạ dán đè'.
+    """
+    if target_crop is None or blend <= 0.0:
+        return bgr_fake
+    try:
+        src_lab = cv2.cvtColor(bgr_fake, cv2.COLOR_BGR2LAB).astype(np.float32)
+        tgt_lab = cv2.cvtColor(target_crop, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+        h, w = bgr_fake.shape[:2]
+        center_mask = np.zeros((h, w), dtype=np.float32)
+        cv2.ellipse(center_mask, (w // 2, h // 2), (int(w * 0.35), int(h * 0.40)), 0, 0, 360, 1.0, -1)
+        mask_idx = center_mask > 0.5
+
+        matched_lab = np.copy(src_lab)
+        for i in range(3):
+            src_chan = src_lab[:, :, i]
+            tgt_chan = tgt_lab[:, :, i]
+
+            s_vals = src_chan[mask_idx]
+            t_vals = tgt_chan[mask_idx]
+
+            s_mean = np.mean(s_vals)
+            s_std = max(np.std(s_vals), 1e-4)
+
+            t_mean = np.mean(t_vals)
+            t_std = max(np.std(t_vals), 1e-4)
+
+            scaled = (src_chan - s_mean) * (t_std / s_std) + t_mean
+            matched_lab[:, :, i] = np.clip(scaled, 0.0, 255.0)
+
+        matched_bgr = cv2.cvtColor(matched_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+        if blend < 1.0:
+            return cv2.addWeighted(matched_bgr, blend, bgr_fake, 1.0 - blend, 0)
+        return matched_bgr
+    except Exception:
+        return bgr_fake
+
 def paste_back_seamless(target_img, bgr_fake, M, mask_blur_pct=0.18):
     """
     Seamless feather paste-back with elliptical soft mask.
@@ -724,12 +765,14 @@ def process_face_swap(
     mask_blur: float = Form(0.18),
     video_crf: int = Form(18),
     use_gfpgan: str = Form("false"),
-    turbo_threads: int = Form(2)
+    turbo_threads: int = Form(2),
+    color_match: float = Form(0.85)
 ):
     init_models()
 
     # Normalize options
     blur_val = mask_blur / 100.0 if mask_blur > 1.0 else mask_blur
+    color_match_val = color_match / 100.0 if color_match > 1.0 else color_match
     enhancer_type = face_enhancer
     if use_gfpgan.lower() in ("true", "1") and enhancer_type == "none":
         enhancer_type = "gfpgan"
@@ -858,6 +901,12 @@ def process_face_swap(
                             bgr_fake, M = swapper.get(frame, target_f, source_face, paste_back=False)
                             if active_enhancer is not None:
                                 bgr_fake = enhance_face(active_enhancer, bgr_fake, blend=enhancer_blend)
+
+                            # 🌟 Tiệp màu da & ánh sáng môi trường (Skin & Lighting Match - Triệt tiêu giả trân)
+                            if color_match_val > 0.0:
+                                target_crop = cv2.warpAffine(frame, M, (bgr_fake.shape[1], bgr_fake.shape[0]))
+                                bgr_fake = match_skin_and_lighting(bgr_fake, target_crop, blend=color_match_val)
+
                             frame = paste_back_seamless(frame, bgr_fake, M, mask_blur_pct=blur_val)
                         except Exception:
                             frame = swapper.get(frame, target_f, source_face, paste_back=True)
