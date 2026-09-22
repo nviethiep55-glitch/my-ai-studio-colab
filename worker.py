@@ -883,6 +883,17 @@ def process_face_swap(
         current_progress["status"] = "completed"
         current_progress["current_frame"] = total_frames
 
+        # Tự động lưu bản sao trực tiếp vào Google Drive output_videos (ngay trong Drive của người dùng)
+        for d_out in ["/content/drive/MyDrive/output_videos", "/content/drive/MyDrive/AI_Colab_Cache/output_videos"]:
+            try:
+                if os.path.exists("/content/drive/MyDrive"):
+                    os.makedirs(d_out, exist_ok=True)
+                    safe_name = f"swapped_{int(time.time())}_{target_video.filename}"
+                    shutil.copy(final_out, os.path.join(d_out, safe_name))
+                    print(f"🎉 [Colab Worker] Đã lưu video thành phẩm vào Google Drive: {d_out}/{safe_name}", flush=True)
+            except Exception as drive_err:
+                pass
+
         return FileResponse(
             final_out,
             media_type="video/mp4",
