@@ -77,7 +77,7 @@ import insightface
 from insightface.app import FaceAnalysis
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -146,6 +146,323 @@ def init_models():
 
 def compute_similarity(emb1, emb2):
     return float(np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2)))
+
+INDEX_HTML = """<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My AI Studio — GPU Cloud Accelerator & Face Swap WebUI</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Plus Jakarta Sans', sans-serif; }
+  </style>
+</head>
+<body class="bg-[#080b12] text-slate-200 min-h-screen flex flex-col">
+  <!-- Header -->
+  <header class="border-b border-slate-800/80 bg-[#0d121f]/80 backdrop-blur sticky top-0 z-50">
+    <div class="max-w-6xl mx-auto px-4 py-3.5 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 to-orange-500 flex items-center justify-center text-black font-black text-lg shadow-lg shadow-amber-500/20">
+          ⚡
+        </div>
+        <div>
+          <h1 class="text-base font-extrabold text-white flex items-center gap-2">
+            <span>My AI Studio — GPU Cloud Accelerator</span>
+            <span class="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold">Tesla T4 16GB</span>
+          </h1>
+          <p class="text-xs text-slate-400">Động cơ hoán đổi khuôn mặt siêu tốc độ cao kết nối My AI Studio</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <div id="gpu-status-pill" class="px-3 py-1.5 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs font-bold flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span id="gpu-status-text">Đang kết nối GPU...</span>
+        </div>
+        <a href="/docs" target="_blank" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition border border-slate-700">
+          API Docs 📖
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="flex-1 max-w-6xl w-full mx-auto px-4 py-6 space-y-6">
+    <!-- Notice Banner -->
+    <div class="p-4 rounded-2xl bg-gradient-to-r from-amber-950/40 via-studio-900 to-slate-900 border border-amber-500/30 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+      <div class="space-y-1">
+        <h3 class="text-sm font-bold text-amber-300 flex items-center gap-2">
+          <span>🎉 Máy Chủ GPU Đang Hoạt Động 100% Hoàn Hảo!</span>
+        </h3>
+        <p class="text-xs text-slate-300">
+          Đường truyền Ngrok cố định: <code class="px-2 py-0.5 rounded bg-black/50 text-amber-400 font-mono text-[11px] select-all" id="current-url"></code> đã sẵn sàng nhận lệnh từ <b>My AI Studio</b> trên máy tính của bạn.
+        </p>
+      </div>
+      <div class="flex items-center gap-2 flex-shrink-0">
+        <a href="http://localhost:3000" target="_blank" class="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-black font-extrabold text-xs shadow-lg shadow-amber-500/20 transition flex items-center gap-1.5">
+          <span>Mở My AI Studio Máy Tính</span>
+          <span>↗</span>
+        </a>
+      </div>
+    </div>
+
+    <!-- WebUI Face Swap Interactive Playground -->
+    <div class="p-6 rounded-3xl bg-[#0f1422] border border-slate-800/80 shadow-2xl space-y-6">
+      <div class="border-b border-slate-800/80 pb-4 flex items-center justify-between">
+        <div>
+          <h2 class="text-base font-extrabold text-white flex items-center gap-2">
+            <span>🎭 Giao Diện Hoán Đổi Mặt Trực Tiếp (Face Swap WebUI)</span>
+            <span class="text-[10px] px-2 py-0.5 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30 font-semibold">Thử Nghiệm Nhanh</span>
+          </h2>
+          <p class="text-xs text-slate-400 mt-0.5">Bạn có thể thử hoán đổi ngay 1 video tại đây, hoặc dùng My AI Studio để chạy hàng loạt cả thư mục!</p>
+        </div>
+      </div>
+
+      <form id="swap-form" onsubmit="handleSwapSubmit(event)" class="space-y-5">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+          <!-- 1. Source Image -->
+          <div class="space-y-2">
+            <label class="block text-xs font-bold text-slate-300">1. Ảnh Mặt Mới (Source Face): <span class="text-rose-400">*</span></label>
+            <div class="relative border-2 border-dashed border-slate-700 hover:border-amber-500/60 rounded-2xl p-4 text-center cursor-pointer transition bg-[#141a2b] group">
+              <input type="file" id="source_image" accept="image/*" required class="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-10" onchange="previewImage(this, 'src-preview', 'src-name')">
+              <div id="src-preview-container" class="space-y-2 flex flex-col items-center justify-center min-h-[140px]">
+                <img id="src-preview" class="hidden w-24 h-24 object-cover rounded-xl border border-amber-500/40 shadow">
+                <div id="src-placeholder" class="space-y-1">
+                  <div class="text-2xl">👤</div>
+                  <p class="text-xs font-semibold text-slate-300">Kéo thả hoặc bấm để chọn ảnh mặt mới</p>
+                  <p class="text-[10px] text-slate-500">Hỗ trợ JPG, PNG, WEBP (ảnh rõ mặt)</p>
+                </div>
+                <p id="src-name" class="text-[11px] font-mono text-amber-400 font-bold truncate max-w-full px-2"></p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 2. Target Video -->
+          <div class="space-y-2">
+            <label class="block text-xs font-bold text-slate-300">2. Video Cần Đổi Mặt (Target Video): <span class="text-rose-400">*</span></label>
+            <div class="relative border-2 border-dashed border-slate-700 hover:border-amber-500/60 rounded-2xl p-4 text-center cursor-pointer transition bg-[#141a2b] group">
+              <input type="file" id="target_video" accept="video/*" required class="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-10" onchange="previewVideo(this, 'tgt-name')">
+              <div class="space-y-2 flex flex-col items-center justify-center min-h-[140px]">
+                <div class="text-2xl">🎬</div>
+                <p class="text-xs font-semibold text-slate-300">Kéo thả hoặc bấm để chọn video gốc</p>
+                <p class="text-[10px] text-slate-500">Hỗ trợ MP4, MOV, MKV, WEBM</p>
+                <p id="tgt-name" class="text-[11px] font-mono text-amber-400 font-bold truncate max-w-full px-2"></p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Optional target face reference -->
+        <div class="p-3.5 rounded-xl bg-[#141a2b] border border-slate-800 space-y-3">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+              <span>🎯 Chỉ Đổi Đúng 1 Người Cụ Thể Trong Video (Tùy Chọn):</span>
+            </label>
+            <span class="text-[10px] text-slate-500">Nếu video có nhiều người, tải ảnh người cần đổi vào đây</span>
+          </div>
+          <div class="flex items-center gap-3">
+            <input type="file" id="target_ref_image" accept="image/*" class="text-xs text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-800 file:text-amber-400 hover:file:bg-slate-700 cursor-pointer">
+            <div class="flex-1 flex items-center gap-2">
+              <span class="text-[11px] text-slate-400 whitespace-nowrap">Độ khớp:</span>
+              <input type="range" id="similarity_threshold" min="0.2" max="0.8" step="0.05" value="0.4" class="w-32 accent-amber-500" oninput="document.getElementById('sim-val').textContent = this.value">
+              <span id="sim-val" class="text-xs font-mono text-amber-400 font-bold">0.40</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Action Button -->
+        <div class="flex items-center justify-end gap-3 pt-2">
+          <button type="submit" id="btn-submit" class="w-full md:w-auto px-6 py-3 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-black font-extrabold text-sm shadow-xl shadow-amber-500/20 transition flex items-center justify-center gap-2 cursor-pointer">
+            <span id="btn-icon">⚡</span>
+            <span id="btn-text">BẮT ĐẦU HOÁN ĐỔI MẶT (GPU TURBO)</span>
+          </button>
+        </div>
+      </form>
+
+      <!-- Progress Section -->
+      <div id="progress-section" class="hidden space-y-3 p-4 rounded-2xl bg-[#141a2b] border border-amber-500/30">
+        <div class="flex items-center justify-between text-xs">
+          <span id="progress-status" class="font-bold text-amber-400 flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+            Đang xử lý trên GPU Tesla T4...
+          </span>
+          <span id="progress-fps" class="font-mono text-emerald-400 font-bold text-xs">0 FPS</span>
+        </div>
+        <div class="w-full bg-slate-900 rounded-full h-3 overflow-hidden border border-slate-700">
+          <div id="progress-bar" class="bg-gradient-to-r from-amber-500 to-orange-500 h-full rounded-full transition-all duration-300 w-0"></div>
+        </div>
+        <div class="flex items-center justify-between text-[11px] text-slate-400 font-mono">
+          <span id="progress-frames">Frame: 0 / 0</span>
+          <span id="progress-pct">0%</span>
+        </div>
+      </div>
+
+      <!-- Result Video Player -->
+      <div id="result-section" class="hidden space-y-3 p-4 rounded-2xl bg-emerald-950/30 border border-emerald-500/40">
+        <div class="flex items-center justify-between">
+          <h3 class="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
+            <span>✅ Hoán Đổi Thành Công!</span>
+          </h3>
+          <a id="btn-download" href="#" download="swapped_video.mp4" class="px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold text-xs flex items-center gap-1 shadow transition">
+            <span>Tải Video Thành Phẩm ⬇</span>
+          </a>
+        </div>
+        <div class="rounded-xl overflow-hidden bg-black max-h-[480px] flex items-center justify-center">
+          <video id="result-video" controls class="max-h-[480px] w-auto mx-auto"></video>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Footer -->
+  <footer class="border-t border-slate-800/80 py-4 text-center text-xs text-slate-500">
+    My AI Studio — GPU Compute Accelerator (Tesla T4 16GB) · Kết nối nội bộ an toàn 100%
+  </footer>
+
+  <script>
+    document.getElementById('current-url').textContent = window.location.origin;
+
+    async function loadHealth() {
+      try {
+        const res = await fetch('/health');
+        if (res.ok) {
+          const data = await res.json();
+          const isGpu = data.gpu && !data.gpu.toLowerCase().includes('cpu');
+          const isTurbo = !data.provider || data.provider.includes('CUDA');
+          const pill = document.getElementById('gpu-status-pill');
+          const txt = document.getElementById('gpu-status-text');
+          if (isGpu) {
+            pill.className = 'px-3 py-1.5 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs font-bold flex items-center gap-2';
+            txt.textContent = `🟢 ${data.gpu} (${data.vram || '15GB'}) [${isTurbo ? '🔥 GPU Turbo' : 'CPU'}]`;
+          } else {
+            pill.className = 'px-3 py-1.5 rounded-xl bg-amber-950/60 border border-amber-500/40 text-amber-300 text-xs font-bold flex items-center gap-2';
+            txt.textContent = `⚠️ Đang dùng ${data.gpu}`;
+          }
+        }
+      } catch (e) {
+        document.getElementById('gpu-status-text').textContent = '⚠️ Không thể kết nối API';
+      }
+    }
+    loadHealth();
+    setInterval(loadHealth, 10000);
+
+    function previewImage(input, imgId, nameId) {
+      if (input.files && input.files[0]) {
+        const file = input.files[0];
+        document.getElementById(nameId).textContent = file.name;
+        const reader = new FileReader();
+        reader.onload = e => {
+          const img = document.getElementById(imgId);
+          img.src = e.target.result;
+          img.classList.remove('hidden');
+          document.getElementById('src-placeholder').classList.add('hidden');
+        };
+        reader.readAsDataURL(file);
+      }
+    }
+
+    function previewVideo(input, nameId) {
+      if (input.files && input.files[0]) {
+        document.getElementById(nameId).textContent = input.files[0].name;
+      }
+    }
+
+    let pollInterval = null;
+
+    async function handleSwapSubmit(e) {
+      e.preventDefault();
+      const srcFile = document.getElementById('source_image').files[0];
+      const tgtFile = document.getElementById('target_video').files[0];
+      const refFile = document.getElementById('target_ref_image').files[0];
+      const sim = document.getElementById('similarity_threshold').value;
+
+      if (!srcFile || !tgtFile) {
+        alert('Vui lòng chọn cả ảnh mặt mới và video gốc!');
+        return;
+      }
+
+      const btn = document.getElementById('btn-submit');
+      const btnText = document.getElementById('btn-text');
+      btn.disabled = true;
+      btn.classList.add('opacity-60', 'cursor-not-allowed');
+      btnText.textContent = 'ĐANG XỬ LÝ TRÊN GPU TESLA T4...';
+
+      const progressSec = document.getElementById('progress-section');
+      const resultSec = document.getElementById('result-section');
+      progressSec.classList.remove('hidden');
+      resultSec.classList.add('hidden');
+
+      const formData = new FormData();
+      formData.append('source_image', srcFile);
+      formData.append('target_video', tgtFile);
+      if (refFile) {
+        formData.append('target_ref_image', refFile);
+        formData.append('has_target_ref', 'true');
+      } else {
+        formData.append('has_target_ref', 'false');
+      }
+      formData.append('similarity_threshold', sim);
+      formData.append('turbo_threads', '2');
+
+      pollInterval = setInterval(async () => {
+        try {
+          const pRes = await fetch('/progress');
+          if (pRes.ok) {
+            const p = await pRes.json();
+            if (p.total_frames > 0) {
+              const pct = Math.min(99, Math.round((p.current_frame / p.total_frames) * 100));
+              document.getElementById('progress-bar').style.width = pct + '%';
+              document.getElementById('progress-pct').textContent = pct + '%';
+              document.getElementById('progress-frames').textContent = `Frame: ${p.current_frame} / ${p.total_frames}`;
+              document.getElementById('progress-fps').textContent = `~${p.fps || 0} FPS`;
+            }
+          }
+        } catch {}
+      }, 1000);
+
+      try {
+        const res = await fetch('/swap', {
+          method: 'POST',
+          body: formData
+        });
+
+        clearInterval(pollInterval);
+
+        if (!res.ok) {
+          const errTxt = await res.text();
+          throw new Error(errTxt || res.statusText);
+        }
+
+        const blob = await res.blob();
+        const videoUrl = URL.createObjectURL(blob);
+
+        document.getElementById('progress-bar').style.width = '100%';
+        document.getElementById('progress-pct').textContent = '100%';
+        document.getElementById('progress-status').textContent = '✅ Xử lý hoàn tất!';
+
+        const resultVideo = document.getElementById('result-video');
+        resultVideo.src = videoUrl;
+        document.getElementById('btn-download').href = videoUrl;
+
+        resultSec.classList.remove('hidden');
+      } catch (err) {
+        clearInterval(pollInterval);
+        alert('Lỗi xử lý: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.classList.remove('opacity-60', 'cursor-not-allowed');
+        btnText.textContent = 'BẮT ĐẦU HOÁN ĐỔI MẶT (GPU TURBO)';
+      }
+    }
+  </script>
+</body>
+</html>
+"""
+
+@app.get("/", response_class=HTMLResponse)
+def index_page():
+    return INDEX_HTML
 
 @app.get("/health")
 def health_check():
