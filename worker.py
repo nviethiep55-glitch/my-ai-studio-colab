@@ -10,20 +10,31 @@ import glob
 import ctypes
 from typing import Optional
 
-# 1. Cấu hình biến môi trường LD_LIBRARY_PATH cho CUDA 12
-try:
-    import site
-    for sp in site.getsitepackages():
-        nv = os.path.join(sp, 'nvidia')
-        if os.path.exists(nv):
-            for sub in os.listdir(nv):
-                lib_p = os.path.join(nv, sub, 'lib')
-                if os.path.isdir(lib_p):
-                    os.environ["LD_LIBRARY_PATH"] = f"{lib_p}:{os.environ.get('LD_LIBRARY_PATH', '')}"
-except Exception:
-    pass
+# 1. Dọn dẹp triệt để bất kỳ symlink giả .so.13 nào (loại bỏ lỗi version 'libcudart.so.13' not found)
+for bad_dir in ["/usr/lib", "/usr/lib/x86_64-linux-gnu", "/usr/local/cuda/lib64"]:
+    for f in glob.glob(os.path.join(bad_dir, "*so.13*")):
+        try:
+            if os.path.islink(f):
+                os.remove(f)
+        except Exception:
+            pass
+subprocess.run(["ldconfig"], check=False)
 
-# 2. Cực kỳ quan trọng: Nạp toàn bộ thư viện NVIDIA CUDA 12 / cuDNN vào Global Symbol Table
+# 2. Đảm bảo ONNX Runtime GPU là bản 1.26.0 (tương thích tuyệt đối CUDA 12.8 của Colab Tesla T4)
+try:
+    import importlib.metadata
+    ort_installed = importlib.metadata.version("onnxruntime-gpu")
+    if ort_installed != "1.26.0":
+        print(f"⏳ [Colab Worker] Phát hiện onnxruntime-gpu {ort_installed}, đang tự động chuyển sang bản 1.26.0 (CUDA 12 Turbo)...", flush=True)
+        subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "onnxruntime", "onnxruntime-gpu"], check=False)
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "onnxruntime-gpu==1.26.0"], check=True)
+except Exception:
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "onnxruntime-gpu==1.26.0"], check=False)
+    except Exception:
+        pass
+
+# 3. Cấu hình biến môi trường và nạp toàn bộ thư viện NVIDIA CUDA 12
 search_dirs = ["/usr/lib", "/usr/lib/x86_64-linux-gnu", "/usr/local/cuda/lib64", "/usr/local/cuda-12/lib64"]
 try:
     import site
@@ -33,8 +44,9 @@ try:
             for root, _, files in os.walk(nv):
                 if 'lib' in root:
                     search_dirs.append(root)
+                    os.environ["LD_LIBRARY_PATH"] = f"{root}:{os.environ.get('LD_LIBRARY_PATH', '')}"
                     for f in sorted(files):
-                        if f.endswith('.so') or '.so.' in f:
+                        if (f.endswith('.so') or '.so.' in f) and 'so.13' not in f:
                             fp = os.path.join(root, f)
                             try:
                                 ctypes.CDLL(fp, mode=ctypes.RTLD_GLOBAL)
@@ -43,34 +55,7 @@ try:
 except Exception:
     pass
 
-# Tự động tạo symlink alias cho .so.13, .so.12, .so.8, .so.9 nếu thiếu
-cuda_alias_map = {
-    "libcublasLt.so.13": "libcublasLt.so.12",
-    "libcublas.so.13": "libcublas.so.12",
-    "libnvrtc.so.13": "libnvrtc.so.12",
-    "libcudart.so.13": "libcudart.so.12",
-    "libcufft.so.12": "libcufft.so.11",
-    "libcudnn.so.8": "libcudnn.so.9",
-    "libcudnn.so.9": "libcudnn.so.8",
-}
-for target_name, src_name in cuda_alias_map.items():
-    src_found = None
-    for s_dir in search_dirs:
-        matches = glob.glob(os.path.join(s_dir, f"{src_name}*"))
-        if matches:
-            src_found = matches[0]
-            break
-    if src_found:
-        for dest_dir in ["/usr/lib", "/usr/lib/x86_64-linux-gnu", "/usr/local/cuda/lib64"]:
-            if os.path.exists(dest_dir):
-                dest_file = os.path.join(dest_dir, target_name)
-                if not os.path.exists(dest_file):
-                    try:
-                        os.symlink(src_found, dest_file)
-                    except Exception:
-                        pass
-
-# 3. Preload torch for CUDA libraries & warmup GPU context
+# 4. Kích hoạt PyTorch CUDA context
 try:
     import torch
     if torch.cuda.is_available():
@@ -79,8 +64,9 @@ try:
     torch_lib = os.path.join(os.path.dirname(torch.__file__), "lib")
     if os.path.exists(torch_lib):
         search_dirs.append(torch_lib)
+        os.environ["LD_LIBRARY_PATH"] = f"{torch_lib}:{os.environ.get('LD_LIBRARY_PATH', '')}"
         for f in sorted(os.listdir(torch_lib)):
-            if f.endswith('.so') or '.so.' in f:
+            if (f.endswith('.so') or '.so.' in f) and 'so.13' not in f:
                 try:
                     ctypes.CDLL(os.path.join(torch_lib, f), mode=ctypes.RTLD_GLOBAL)
                 except Exception:
@@ -88,6 +74,7 @@ try:
 except Exception:
     pass
 
+# 5. Khởi tạo ONNX Runtime và nạp Provider
 try:
     import onnxruntime as ort
     if hasattr(ort, "preload_dlls"):
@@ -95,16 +82,10 @@ try:
             ort.preload_dlls()
         except Exception:
             pass
-    # Test loading CUDA provider shared library directly
-    try:
-        capi_dir = os.path.dirname(ort.capi.__file__)
-        cuda_so = os.path.join(capi_dir, "libonnxruntime_providers_cuda.so")
-        ctypes.CDLL(cuda_so)
-        print("🚀 [Colab Worker] Đã nạp thành công thư viện CUDA Provider!", flush=True)
-    except Exception as e:
-        print(f"⚠️ [Colab Worker] Thông báo nạp CUDA SO: {e}", flush=True)
-except Exception:
-    pass
+    available_providers = ort.get_available_providers()
+    print(f"🚀 [Colab Worker] ONNX Runtime {ort.__version__} Providers: {available_providers}", flush=True)
+except Exception as e:
+    print(f"⚠️ [Colab Worker] Thông báo nạp ONNX: {e}", flush=True)
 
 import cv2
 import numpy as np
