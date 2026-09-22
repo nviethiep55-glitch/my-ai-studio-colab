@@ -25,11 +25,11 @@ except Exception:
 
 # 2. Cực kỳ quan trọng: Nạp trước các thư viện CUDA 12 / cuDNN vào Global Symbol Table (RTLD_GLOBAL)
 cuda_so_candidates = [
-    "libcudart.so", "libcudart.so.12",
-    "libnvrtc.so", "libnvrtc.so.12",
-    "libcublasLt.so", "libcublasLt.so.12",
-    "libcublas.so", "libcublas.so.12",
-    "libcufft.so", "libcufft.so.12",
+    "libcudart.so", "libcudart.so.12", "libcudart.so.13",
+    "libnvrtc.so", "libnvrtc.so.12", "libnvrtc.so.13",
+    "libcublasLt.so", "libcublasLt.so.12", "libcublasLt.so.13",
+    "libcublas.so", "libcublas.so.12", "libcublas.so.13",
+    "libcufft.so", "libcufft.so.11", "libcufft.so.12",
     "libcudnn.so", "libcudnn.so.9", "libcudnn.so.8"
 ]
 search_dirs = ["/usr/lib", "/usr/local/cuda/lib64", "/usr/local/cuda-12/lib64"]
@@ -39,6 +39,31 @@ try:
         search_dirs.extend(glob.glob(f"{sp}/nvidia/*/lib"))
 except Exception:
     pass
+
+# Tự động tạo symlink alias cho .so.13 và .so.12 nếu thiếu
+cuda_alias_map = {
+    "libcublasLt.so.13": "libcublasLt.so.12",
+    "libcublas.so.13": "libcublas.so.12",
+    "libnvrtc.so.13": "libnvrtc.so.12",
+    "libcudart.so.13": "libcudart.so.12",
+    "libcufft.so.12": "libcufft.so.11",
+}
+for target_name, src_name in cuda_alias_map.items():
+    src_found = None
+    for s_dir in search_dirs:
+        matches = glob.glob(os.path.join(s_dir, f"{src_name}*"))
+        if matches:
+            src_found = matches[0]
+            break
+    if src_found:
+        for dest_dir in ["/usr/lib", "/usr/local/cuda/lib64"]:
+            if os.path.exists(dest_dir):
+                dest_file = os.path.join(dest_dir, target_name)
+                if not os.path.exists(dest_file):
+                    try:
+                        os.symlink(src_found, dest_file)
+                    except Exception:
+                        pass
 
 for lib in cuda_so_candidates:
     try:
@@ -135,9 +160,10 @@ def download_or_restore_model(filename: str, url: str, target_dir: str, alt_name
 
     # Check Drive caches for any candidate (0s load)
     drive_cache_dirs = [
-        drive_models_dir,
+        "/content/drive/MyDrive/AI_Colab_Cache/models",
         "/content/drive/MyDrive/AI_Colab_Cache/BatchFaceSwap/models",
-        "/content/drive/MyDrive/AI_Colab_Cache/models"
+        drive_models_dir,
+        "/content/drive/MyDrive/models"
     ]
     for d_dir in drive_cache_dirs:
         if os.path.exists(d_dir):
@@ -153,35 +179,45 @@ def download_or_restore_model(filename: str, url: str, target_dir: str, alt_name
                         return d_path
 
     target_path = os.path.join(target_dir, filename)
-    print(f"⏳ [Tải Lần Đầu] Đang tải ma trận mô hình qua kết nối đa luồng...", flush=True)
+    print(f"⏳ [Tải 1 Lần Vào Drive] Đang lưu mô hình vào Google Drive để vĩnh viễn không phải tải lại...", flush=True)
     os.makedirs(target_dir, exist_ok=True)
-    success = False
+    
+    import urllib.request
     try:
-        res = subprocess.run([
-            "aria2c", "-c", "-s", "16", "-x", "16", "-k", "1M", "-j", "16",
-            "--check-certificate=false",
-            url, "-d", target_dir, "-o", filename
-        ], check=False)
-        if res.returncode == 0 and os.path.exists(target_path) and os.path.getsize(target_path) > 1024 * 1024:
-            success = True
-    except Exception:
-        pass
-
-    if not success:
-        subprocess.run(["wget", "-c", url, "-O", target_path], check=False)
-        if not os.path.exists(target_path) or os.path.getsize(target_path) < 1024 * 1024:
-            subprocess.run(["curl", "-sL", url, "-o", target_path], check=False)
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+        with urllib.request.urlopen(req, timeout=90) as resp, open(target_path, 'wb') as out_f:
+            total_size = int(resp.headers.get('Content-Length', 0))
+            downloaded = 0
+            chunk_size = 4 * 1024 * 1024
+            last_reported = -1
+            while True:
+                chunk = resp.read(chunk_size)
+                if not chunk:
+                    break
+                out_f.write(chunk)
+                downloaded += len(chunk)
+                if total_size > 0:
+                    pct = int((downloaded / total_size) * 100)
+                    if pct // 20 > last_reported:
+                        last_reported = pct // 20
+                        print(f"  📥 Tiến trình: {pct}% ({downloaded // (1024*1024)}MB / {total_size // (1024*1024)}MB)...", flush=True)
+    except Exception as dl_err:
+        print(f"  ⚠️ Lỗi urllib: {dl_err}. Đang thử tải ngầm...", flush=True)
+        subprocess.run(["curl", "-sL", url, "-o", target_path], check=False)
 
     if os.path.exists(target_path) and os.path.getsize(target_path) > 1024 * 1024:
+        # Lưu vào tất cả các thư mục Drive để lần sau chạy trong 0.1 giây
         for d_dir in drive_cache_dirs:
-            if os.path.exists(d_dir):
-                try:
-                    d_path = os.path.join(d_dir, filename)
-                    shutil.copy(target_path, d_path)
-                    print(f"🎉 Đã lưu bộ trọng số vào Google Drive Cache!", flush=True)
-                    break
-                except Exception:
-                    pass
+            try:
+                os.makedirs(d_dir, exist_ok=True)
+                d_path = os.path.join(d_dir, filename)
+                shutil.copy(target_path, d_path)
+                for alt in alt_names:
+                    shutil.copy(target_path, os.path.join(d_dir, alt))
+                print(f"🎉 Đã lưu vĩnh viễn vào Google Drive: {d_dir}!", flush=True)
+                break
+            except Exception:
+                pass
 
     return target_path
 
@@ -189,6 +225,18 @@ def init_models():
     global face_app, swapper
     if face_app is not None and swapper is not None:
         return
+
+    # Liên kết cache InsightFace sang Google Drive để vĩnh viễn không bao giờ phải tải lại buffalo_l (281MB)
+    drive_if_dir = "/content/drive/MyDrive/AI_Colab_Cache/insightface/models"
+    root_if_dir = "/root/.insightface/models"
+    if os.path.exists("/content/drive/MyDrive"):
+        os.makedirs(drive_if_dir, exist_ok=True)
+        os.makedirs("/root/.insightface", exist_ok=True)
+        if not os.path.exists(root_if_dir):
+            try:
+                os.symlink(drive_if_dir, root_if_dir)
+            except Exception:
+                pass
 
     print("⚡ [Colab Worker] Khởi tạo mô hình AI trên CUDA GPU...", flush=True)
     available_providers = []
