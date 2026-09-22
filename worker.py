@@ -6,11 +6,61 @@ import shutil
 import tempfile
 import threading
 import subprocess
+import glob
+import ctypes
 from typing import Optional
 
-# Preload torch for CUDA libraries
+# 1. Cấu hình biến môi trường LD_LIBRARY_PATH cho CUDA 12
+try:
+    import site
+    for sp in site.getsitepackages():
+        nv = os.path.join(sp, 'nvidia')
+        if os.path.exists(nv):
+            for sub in os.listdir(nv):
+                lib_p = os.path.join(nv, sub, 'lib')
+                if os.path.isdir(lib_p):
+                    os.environ["LD_LIBRARY_PATH"] = f"{lib_p}:{os.environ.get('LD_LIBRARY_PATH', '')}"
+except Exception:
+    pass
+
+# 2. Cực kỳ quan trọng: Nạp trước các thư viện CUDA 12 / cuDNN vào Global Symbol Table (RTLD_GLOBAL)
+cuda_so_candidates = [
+    "libcudart.so", "libcudart.so.12",
+    "libnvrtc.so", "libnvrtc.so.12",
+    "libcublasLt.so", "libcublasLt.so.12",
+    "libcublas.so", "libcublas.so.12",
+    "libcufft.so", "libcufft.so.12",
+    "libcudnn.so", "libcudnn.so.9", "libcudnn.so.8"
+]
+search_dirs = ["/usr/lib", "/usr/local/cuda/lib64", "/usr/local/cuda-12/lib64"]
+try:
+    import site
+    for sp in site.getsitepackages():
+        search_dirs.extend(glob.glob(f"{sp}/nvidia/*/lib"))
+except Exception:
+    pass
+
+for lib in cuda_so_candidates:
+    try:
+        ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+        continue
+    except Exception:
+        pass
+    for d in search_dirs:
+        fp = os.path.join(d, lib)
+        if os.path.exists(fp):
+            try:
+                ctypes.CDLL(fp, mode=ctypes.RTLD_GLOBAL)
+                break
+            except Exception:
+                pass
+
+# 3. Preload torch for CUDA libraries & warmup GPU context
 try:
     import torch
+    if torch.cuda.is_available():
+        torch.cuda.init()
+        _ = torch.zeros(1).cuda()
 except Exception:
     pass
 
@@ -62,7 +112,14 @@ def init_models():
         return
 
     print("⚡ [Colab Worker] Khởi tạo mô hình AI trên CUDA GPU...", flush=True)
-    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+    cuda_opts = {
+        'device_id': 0,
+        'arena_extend_strategy': 'kNextPowerOfTwo',
+        'gpu_mem_limit': 14 * 1024 * 1024 * 1024,
+        'cudnn_conv_algo_search': 'DEFAULT',
+        'do_copy_in_default_stream': True
+    }
+    providers = [('CUDAExecutionProvider', cuda_opts), 'CPUExecutionProvider']
     face_app = FaceAnalysis(name='buffalo_l', providers=providers)
     face_app.prepare(ctx_id=0, det_size=(640, 640))
 
@@ -73,6 +130,18 @@ def init_models():
         subprocess.run(["wget", "-c", url, "-O", swapper_path], check=True)
 
     swapper = insightface.model_zoo.get_model(swapper_path, download=False, providers=providers)
+    
+    # Verify active provider
+    try:
+        active_list = swapper.session.get_providers()
+        print(f"🚀 [Colab Worker] ONNX Runtime Providers: {active_list}", flush=True)
+        if 'CUDAExecutionProvider' in active_list:
+            print("🔥 TURBO GPU KÍCH HOẠT THÀNH CÔNG! Tốc độ dự kiến ~35-45 FPS.", flush=True)
+        else:
+            print("⚠️ CẢNH BÁO: Đang chạy trên CPU do thiếu cuDNN! Hãy kiểm tra cài đặt nvidia-cudnn-cu12.", flush=True)
+    except Exception:
+        pass
+
     print("✅ [Colab Worker] Mô hình đã sẵn sàng!", flush=True)
 
 def compute_similarity(emb1, emb2):
@@ -90,12 +159,21 @@ def health_check():
     except Exception:
         pass
 
+    active_provider = "CPUExecutionProvider"
+    if swapper is not None:
+        try:
+            active_provider = swapper.session.get_providers()[0]
+        except Exception:
+            pass
+
     return {
         "status": "ok",
         "gpu": gpu_name,
         "vram": vram_str,
+        "provider": active_provider,
         "model_ready": (swapper is not None and face_app is not None),
-        "message": "Colab GPU Worker sẵn sàng!"
+        "webui_url": os.environ.get("WEBUI_URL", ""),
+        "message": f"Colab GPU Worker sẵn sàng ({gpu_name} - Provider: {active_provider})!"
     }
 
 @app.get("/progress")
@@ -107,12 +185,12 @@ async def process_face_swap(
     source_image: UploadFile = File(...),
     target_video: UploadFile = File(...),
     target_ref_image: Optional[UploadFile] = File(None),
+    target_face_image: Optional[UploadFile] = File(None),
     has_target_ref: str = Form("false"),
     similarity_threshold: float = Form(0.40),
     use_gfpgan: str = Form("false"),
     turbo_threads: int = Form(2)
 ):
-    global current_progress
     init_models()
 
     tmp_dir = tempfile.mkdtemp(prefix="faceswap_")
@@ -120,7 +198,7 @@ async def process_face_swap(
         # Save uploaded source face image
         src_path = os.path.join(tmp_dir, "source_face.jpg")
         with open(src_path, "wb") as f:
-            f.write(await source_image.read())
+            shutil.copyfileobj(source_image.file, f)
 
         src_bgr = cv2.imread(src_path)
         if src_bgr is None:
@@ -134,11 +212,12 @@ async def process_face_swap(
 
         # Handle target reference face (selective swap for multi-character video)
         target_ref_face = None
-        has_ref = (has_target_ref.lower() in ("true", "1") and target_ref_image is not None)
-        if has_ref:
+        tgt_upload = target_ref_image or target_face_image
+        has_ref = (has_target_ref.lower() in ("true", "1") or target_face_image is not None) and tgt_upload is not None
+        if has_ref and tgt_upload is not None:
             ref_path = os.path.join(tmp_dir, "ref_target.jpg")
             with open(ref_path, "wb") as f:
-                f.write(await target_ref_image.read())
+                shutil.copyfileobj(tgt_upload.file, f)
             ref_bgr = cv2.imread(ref_path)
             if ref_bgr is not None:
                 r_faces = face_app.get(ref_bgr)
@@ -148,7 +227,7 @@ async def process_face_swap(
         # Save uploaded video
         vid_in_path = os.path.join(tmp_dir, "input_video.mp4")
         with open(vid_in_path, "wb") as f:
-            f.write(await target_video.read())
+            shutil.copyfileobj(target_video.file, f)
 
         cap = cv2.VideoCapture(vid_in_path)
         if not cap.isOpened():
@@ -157,7 +236,7 @@ async def process_face_swap(
         fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
 
         temp_raw_out = os.path.join(tmp_dir, "raw_swapped.mp4")
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -245,6 +324,7 @@ async def process_face_swap(
             "-i", temp_raw_out,
             "-i", vid_in_path,
             "-c:v", "libx264",
+            "-preset", "veryfast",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-map", "0:v:0",
