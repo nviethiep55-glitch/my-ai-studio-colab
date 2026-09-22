@@ -147,6 +147,77 @@ def init_models():
 def compute_similarity(emb1, emb2):
     return float(np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2)))
 
+def paste_back_seamless(target_img, bgr_fake, M, mask_blur_pct=0.18):
+    """
+    Seamless feather paste-back with elliptical soft mask.
+    Triệt tiêu hoàn toàn viền cắt dán cứng, hòa trộn tự nhiên vào da cổ/trán.
+    """
+    h, w = bgr_fake.shape[:2]
+    mask = np.zeros((h, w), dtype=np.float32)
+    cv2.ellipse(mask, (w // 2, h // 2), (int(w * 0.44), int(h * 0.47)), 0, 0, 360, 1.0, -1)
+    
+    ksize = max(3, int(w * mask_blur_pct) | 1)
+    mask = cv2.GaussianBlur(mask, (ksize, ksize), 0)
+    
+    IM = cv2.invertAffineTransform(M)
+    warped_fake = cv2.warpAffine(bgr_fake, IM, (target_img.shape[1], target_img.shape[0]), borderMode=cv2.BORDER_CONSTANT)
+    warped_mask = cv2.warpAffine(mask, IM, (target_img.shape[1], target_img.shape[0]), borderMode=cv2.BORDER_CONSTANT)
+    warped_mask = np.clip(warped_mask, 0.0, 1.0)[:, :, np.newaxis]
+    
+    return (warped_fake * warped_mask + target_img * (1.0 - warped_mask)).astype(np.uint8)
+
+def get_enhancer(model_type="gfpgan"):
+    global enhancer
+    if enhancer is not None:
+        return enhancer
+    if model_type == "none" or not model_type:
+        return None
+    
+    enhancer_path = os.path.join(models_dir, "gfpgan_1.4.onnx")
+    if not os.path.exists(enhancer_path):
+        print("  ⏳ Đang tải mô hình làm nét khuôn mặt GFPGAN 1.4...", flush=True)
+        url = "https://huggingface.co/facefusion/models-3.0.0/resolve/main/gfpgan_1.4.onnx"
+        try:
+            subprocess.run(["wget", "-c", url, "-O", enhancer_path], check=True)
+        except Exception:
+            subprocess.run(["curl", "-sL", url, "-o", enhancer_path], check=False)
+
+    if os.path.exists(enhancer_path) and os.path.getsize(enhancer_path) > 10000:
+        providers = [('CUDAExecutionProvider', {'device_id': 0}), 'CPUExecutionProvider']
+        try:
+            enhancer = ort.InferenceSession(enhancer_path, providers=providers)
+            print("✨ [Colab Worker] Đã kích hoạt bộ làm nét GFPGAN v1.4!", flush=True)
+        except Exception as e:
+            print(f"⚠️ Không thể khởi tạo Enhancer: {e}", flush=True)
+    return enhancer
+
+def enhance_face(enhancer_sess, face_bgr, blend=0.8):
+    if enhancer_sess is None:
+        return face_bgr
+    try:
+        orig_h, orig_w = face_bgr.shape[:2]
+        inp = cv2.resize(face_bgr, (512, 512))
+        inp = inp.astype(np.float32) / 255.0
+        inp = inp[:, :, ::-1]  # BGR to RGB
+        inp = (inp - 0.5) / 0.5  # [-1, 1]
+        inp = np.transpose(inp, (2, 0, 1))
+        inp = np.expand_dims(inp, axis=0)
+
+        in_name = enhancer_sess.get_inputs()[0].name
+        out_name = enhancer_sess.get_outputs()[0].name
+        out = enhancer_sess.run([out_name], {in_name: inp})[0][0]
+
+        out = np.clip((out + 1.0) / 2.0, 0.0, 1.0)
+        out = np.transpose(out, (1, 2, 0))
+        out = (out[:, :, ::-1] * 255.0).astype(np.uint8)
+        out = cv2.resize(out, (orig_w, orig_h))
+
+        if blend < 1.0:
+            out = cv2.addWeighted(out, blend, face_bgr, 1.0 - blend, 0)
+        return out
+    except Exception:
+        return face_bgr
+
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="vi">
 <head>
@@ -505,10 +576,23 @@ async def process_face_swap(
     target_face_image: Optional[UploadFile] = File(None),
     has_target_ref: str = Form("false"),
     similarity_threshold: float = Form(0.40),
+    face_selector_mode: str = Form("largest"),
+    face_enhancer: str = Form("none"),
+    enhancer_blend: float = Form(0.80),
+    mask_blur: float = Form(0.18),
+    video_crf: int = Form(18),
     use_gfpgan: str = Form("false"),
     turbo_threads: int = Form(2)
 ):
     init_models()
+
+    # Normalize options
+    blur_val = mask_blur / 100.0 if mask_blur > 1.0 else mask_blur
+    enhancer_type = face_enhancer
+    if use_gfpgan.lower() in ("true", "1") and enhancer_type == "none":
+        enhancer_type = "gfpgan"
+    
+    active_enhancer = get_enhancer(enhancer_type) if enhancer_type != "none" else None
 
     tmp_dir = tempfile.mkdtemp(prefix="faceswap_")
     try:
@@ -607,16 +691,32 @@ async def process_face_swap(
             try:
                 faces = face_app.get(frame)
                 if len(faces) > 0:
-                    if target_ref_face is not None:
-                        # Match target face by cosine similarity
+                    targets_to_swap = []
+                    if face_selector_mode == "all":
+                        targets_to_swap = faces
+                    elif face_selector_mode == "reference" and target_ref_face is not None:
                         for f in faces:
                             sim = compute_similarity(f.embedding, target_ref_face.embedding)
                             if sim >= similarity_threshold:
-                                frame = swapper.get(frame, f, source_face, paste_back=True)
-                    else:
-                        # Swap largest face in frame
-                        largest = max(faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]))
-                        frame = swapper.get(frame, largest, source_face, paste_back=True)
+                                targets_to_swap.append(f)
+                    else: # "largest" or default
+                        if target_ref_face is not None and has_ref:
+                            for f in faces:
+                                sim = compute_similarity(f.embedding, target_ref_face.embedding)
+                                if sim >= similarity_threshold:
+                                    targets_to_swap.append(f)
+                        if not targets_to_swap:
+                            largest = max(faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]))
+                            targets_to_swap.append(largest)
+
+                    for target_f in targets_to_swap:
+                        try:
+                            bgr_fake, M = swapper.get(frame, target_f, source_face, paste_back=False)
+                            if active_enhancer is not None:
+                                bgr_fake = enhance_face(active_enhancer, bgr_fake, blend=enhancer_blend)
+                            frame = paste_back_seamless(frame, bgr_fake, M, mask_blur_pct=blur_val)
+                        except Exception:
+                            frame = swapper.get(frame, target_f, source_face, paste_back=True)
             except Exception as e:
                 pass
 
@@ -641,6 +741,7 @@ async def process_face_swap(
             "-i", temp_raw_out,
             "-i", vid_in_path,
             "-c:v", "libx264",
+            "-crf", str(video_crf),
             "-preset", "veryfast",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
