@@ -23,14 +23,14 @@ except Exception:
 
 print("=" * 65)
 print("🚀 BATCH FACE SWAP STUDIO - HOÁN ĐỔI MẶT HÀNG LOẠT QUA GOOGLE DRIVE")
-print("🔥 PHIÊN BẢN TURBO PIPELINE - TỐI ƯU KỊCH KHUNG GPU TESLA T4")
+print("🔥 HỖ TRỢ ĐỔI CHÍNH XÁC TỪNG NGƯỜI TRONG CLIP NHIỀU NHÂN VẬT")
 print("=" * 65)
 
 # Đọc tham số tùy chỉnh từ giao diện Colab
 parser = argparse.ArgumentParser()
 parser.add_argument("--enhance", type=str, default="false", help="Bật làm nét mặt")
 parser.add_argument("--enhancer", type=str, default="gfpgan", help="Mô hình làm nét")
-parser.add_argument("--selector", type=str, default="largest", help="Chế độ chọn mặt: largest hoặc all")
+parser.add_argument("--selector", type=str, default="largest", help="Chế độ chọn mặt khi không có ảnh mẫu: largest hoặc all")
 parser.add_argument("--speed", type=str, default="turbo", help="Chế độ tốc độ: turbo hoặc standard")
 args = parser.parse_args()
 
@@ -42,7 +42,6 @@ is_turbo = args.speed.lower() == "turbo"
 print(f"\n⚙️ CẤU HÌNH ĐANG CHẠY:")
 print(f"  • Chế độ tăng tốc GPU              : {'🔥 TURBO KỊCH KHUNG (Đa luồng ~35-40 FPS)' if is_turbo else 'TIÊU CHUẨN (~20 FPS)'}")
 print(f"  • Làm nét khuôn mặt (Face Enhancer): {'BẬT (Nét căng chuẩn HD/4K)' if enable_enhance else 'TẮT (Tốc độ tối đa ~7 phút/15k frame)'}")
-print(f"  • Chế độ nhận diện khuôn mặt       : {'Nhân vật chính (Mặt lớn nhất)' if selector_mode == 'largest' else 'Đổi tất cả các mặt'}")
 
 # 1. Kết nối Google Drive
 print("\n🔗 [1/5] Kiểm tra kết nối Google Drive...")
@@ -60,19 +59,23 @@ else:
         print(f"  ⚠️ Không thể kết nối Drive tự động ({e}). Sẽ chạy trên bộ nhớ tạm.")
 
 base_dir = "/content/drive/MyDrive/AI_Colab_Cache/BatchFaceSwap" if has_drive else "/content/BatchFaceSwap"
+
+# Thư mục chứa ảnh mặt mới & ảnh người trong clip (hỗ trợ cả tiếng Việt lẫn tiếng Anh)
+mat_moi_dir = os.path.join(base_dir, "mat_moi")
 source_dir = os.path.join(base_dir, "source_faces")
+nguoi_trong_clip_dir = os.path.join(base_dir, "nguoi_trong_clip")
+target_faces_dir = os.path.join(base_dir, "target_faces")
 target_dir = os.path.join(base_dir, "target_videos")
 output_dir = os.path.join(base_dir, "output_videos")
 models_dir = os.path.join(base_dir, "models")
 
-os.makedirs(source_dir, exist_ok=True)
-os.makedirs(target_dir, exist_ok=True)
-os.makedirs(output_dir, exist_ok=True)
-os.makedirs(models_dir, exist_ok=True)
+for d in [mat_moi_dir, source_dir, nguoi_trong_clip_dir, target_faces_dir, target_dir, output_dir, models_dir]:
+    os.makedirs(d, exist_ok=True)
 
-print(f"  📁 Thư mục chứa ảnh khuôn mặt mẫu : {source_dir}")
-print(f"  📁 Thư mục chứa video cần đổi mặt : {target_dir}")
-print(f"  📁 Thư mục lưu video thành phẩm   : {output_dir}")
+print(f"  📁 Thư mục [Mặt Mới muốn thay]        : {mat_moi_dir}")
+print(f"  📁 Thư mục [Người trong clip cần đổi] : {nguoi_trong_clip_dir} (Tùy chọn khi clip có nhiều người)")
+print(f"  📁 Thư mục chứa video cần đổi mặt     : {target_dir}")
+print(f"  📁 Thư mục lưu video thành phẩm       : {output_dir}")
 
 # 2. Cài đặt thư viện môi trường cần thiết
 print("\n📦 [2/5] Kiểm tra và cấu hình tăng tốc CUDA GPU...", flush=True)
@@ -169,61 +172,100 @@ except Exception as e:
     print(f"  ❌ Lỗi khởi tạo mô hình GPU: {e}", flush=True)
     sys.exit(1)
 
-# Hàm tăng nét khuôn mặt bằng GFPGAN ONNX
-def enhance_face(target_crop):
-    if enhancer_model is None:
-        return target_crop
-    try:
-        h, w = target_crop.shape[:2]
-        img = cv2.resize(target_crop, (512, 512))
-        img = img.astype(np.float32) / 255.0
-        img = (img - 0.5) / 0.5
-        img = np.transpose(img, (2, 0, 1))
-        img = np.expand_dims(img, axis=0)
-        
-        ort_inputs = {enhancer_model.get_inputs()[0].name: img}
-        ort_outs = enhancer_model.run(None, ort_inputs)
-        
-        out_img = ort_outs[0][0]
-        out_img = np.transpose(out_img, (1, 2, 0))
-        out_img = (out_img * 0.5 + 0.5) * 255.0
-        out_img = np.clip(out_img, 0, 255).astype(np.uint8)
-        return cv2.resize(out_img, (w, h))
-    except Exception:
-        return target_crop
+# Hàm tính độ tương đồng Cosine giữa 2 vector khuôn mặt
+def compute_sim(emb1, emb2):
+    return float(np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2) + 1e-6))
 
-# 5. Chuẩn bị dữ liệu mẫu nếu thư mục còn trống
+# 5. Quét ảnh khuôn mặt & Thiết lập cặp hoán đổi thông minh
 image_exts = ('*.jpg', '*.jpeg', '*.png', '*.webp', '*.JPG', '*.PNG')
-source_files = []
-for ext in image_exts:
-    source_files.extend(glob.glob(os.path.join(source_dir, ext)))
+
+def get_images(folder):
+    files = []
+    for ext in image_exts:
+        files.extend(glob.glob(os.path.join(folder, ext)))
+    return sorted(list(set(files)))
+
+new_face_files = get_images(mat_moi_dir) + get_images(source_dir)
+new_face_files = sorted(list(set(new_face_files)))
+
+ref_face_files = get_images(nguoi_trong_clip_dir) + get_images(target_faces_dir)
+ref_face_files = sorted(list(set(ref_face_files)))
 
 video_exts = ('*.mp4', '*.mov', '*.avi', '*.MP4', '*.MOV', '*.webm')
 target_videos = []
 for ext in video_exts:
     target_videos.extend(glob.glob(os.path.join(target_dir, ext)))
 
-if not source_files:
-    print(f"\n⚠️ CHƯA CÓ ẢNH MẶT MẪU TRONG THƯ MỤC: {source_dir}")
-    print("   Vui lòng tải ít nhất 1 file ảnh chân dung vào thư mục trên Google Drive rồi chạy lại ô này!")
+if not new_face_files:
+    print(f"\n⚠️ CHƯA CÓ ẢNH MẶT MỚI TRONG THƯ MỤC: {mat_moi_dir}")
+    print("   Vui lòng tải ít nhất 1 file ảnh chân dung mặt mới muốn thay vào thư mục trên Google Drive rồi chạy lại ô này!")
     sys.exit(0)
 
 if not target_videos:
     print(f"\n⚠️ CHƯA CÓ VIDEO CẦN ĐỔI MẶT TRONG THƯ MỤC: {target_dir}")
-    print("   Vui lòng tải các video ngắn cần đổi mặt vào thư mục trên Google Drive rồi chạy lại ô này!")
+    print("   Vui lòng tải các video cần đổi mặt vào thư mục trên Google Drive rồi chạy lại ô này!")
     sys.exit(0)
 
-source_path = source_files[0]
-source_img = cv2.imread(source_path)
-source_faces = app.get(source_img)
+swap_pairs = []
+default_source_face = None
 
-if not source_faces:
-    print(f"❌ Không tìm thấy khuôn mặt nào trong ảnh nguồn: {os.path.basename(source_path)}")
-    sys.exit(1)
+if ref_face_files:
+    print(f"\n🎯 [CHẾ ĐỘ CHỈ ĐỊNH ĐÍCH DANH NHÂN VẬT - TARGET REFERENCE MATCH]")
+    print(f"   Phát hiện {len(ref_face_files)} ảnh mẫu người trong clip cần đổi.")
+    
+    # Tạo map stem -> path của mặt mới
+    new_faces_map = {os.path.splitext(os.path.basename(f))[0].lower(): f for f in new_face_files}
+    
+    for r_path in ref_face_files:
+        r_stem = os.path.splitext(os.path.basename(r_path))[0].lower()
+        r_img = cv2.imread(r_path)
+        if r_img is None:
+            continue
+        r_faces = app.get(r_img)
+        if not r_faces:
+            print(f"  ⚠️ Không phát hiện khuôn mặt trong ảnh người trong clip: {os.path.basename(r_path)} -> Bỏ qua")
+            continue
+        ref_face = sorted(r_faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]), reverse=True)[0]
+        
+        # Ghép cặp với ảnh mặt mới tương ứng
+        matched_new_path = None
+        if r_stem in new_faces_map:
+            matched_new_path = new_faces_map[r_stem]
+        elif len(new_face_files) == 1:
+            matched_new_path = new_face_files[0]
+        else:
+            idx = len(swap_pairs)
+            matched_new_path = new_face_files[idx] if idx < len(new_face_files) else new_face_files[0]
+            
+        n_img = cv2.imread(matched_new_path)
+        if n_img is None:
+            continue
+        n_faces = app.get(n_img)
+        if not n_faces:
+            print(f"  ⚠️ Không phát hiện khuôn mặt trong ảnh mặt mới: {os.path.basename(matched_new_path)} -> Bỏ qua")
+            continue
+        new_face = sorted(n_faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]), reverse=True)[0]
+        
+        swap_pairs.append({
+            'ref_embedding': ref_face.embedding,
+            'source_face': new_face,
+            'ref_name': os.path.basename(r_path),
+            'new_name': os.path.basename(matched_new_path)
+        })
+        print(f"  🔗 CẶP #{len(swap_pairs)}: [Người trong clip: {os.path.basename(r_path)}] ➡️ [Mặt mới: {os.path.basename(matched_new_path)}]")
+else:
+    print(f"\n👥 [CHẾ ĐỘ TỰ ĐỘNG THEO NHÂN VẬT CHÍNH]")
+    print(f"   (Thư mục 'nguoi_trong_clip' đang trống -> Tự động đổi nhân vật chính hoặc tất cả)")
+    default_new_path = new_face_files[0]
+    n_img = cv2.imread(default_new_path)
+    n_faces = app.get(n_img)
+    if not n_faces:
+        print(f"❌ Không tìm thấy khuôn mặt nào trong ảnh mặt mới: {os.path.basename(default_new_path)}")
+        sys.exit(1)
+    default_source_face = sorted(n_faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]), reverse=True)[0]
+    print(f"  👤 Khuôn mặt mẫu được chọn: {os.path.basename(default_new_path)}")
 
-source_face = sorted(source_faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]), reverse=True)[0]
-print(f"\n👤 Khuôn mặt mẫu được chọn: {os.path.basename(source_path)}")
-print(f"🎬 Tổng số video cần hoán đổi: {len(target_videos)} video")
+print(f"\n🎬 Tổng số video cần hoán đổi: {len(target_videos)} video")
 
 # 6. Xử lý video bằng ĐƯỜNG ỐNG ĐA LUỒNG (Turbo Pipeline)
 def process_video_pipeline(v_path, final_out):
@@ -288,18 +330,40 @@ def process_video_pipeline(v_path, final_out):
         try:
             target_faces = app.get(frame)
             if target_faces:
-                if selector_mode == "all":
-                    for tf in target_faces:
+                if swap_pairs:
+                    # Chế độ CHỈ ĐỊNH ĐÍCH DANH theo ảnh mẫu (Target Reference Matching)
+                    used_indices = set()
+                    for pair in swap_pairs:
+                        best_sim = -1.0
+                        best_idx = -1
+                        for t_idx, tf in enumerate(target_faces):
+                            if t_idx in used_indices:
+                                continue
+                            sim = compute_sim(pair['ref_embedding'], tf.embedding)
+                            if sim > best_sim:
+                                best_sim = sim
+                                best_idx = t_idx
+                        # Ngưỡng chuẩn xác cùng 1 người (0.40)
+                        if best_idx >= 0 and best_sim >= 0.40:
+                            used_indices.add(best_idx)
+                            try:
+                                frame = swapper.get(frame, target_faces[best_idx], pair['source_face'], paste_back=True)
+                            except Exception:
+                                pass
+                else:
+                    # Chế độ TỰ ĐỘNG khi không có ảnh mẫu người trong clip
+                    if selector_mode == "all":
+                        for tf in target_faces:
+                            try:
+                                frame = swapper.get(frame, tf, default_source_face, paste_back=True)
+                            except Exception:
+                                pass
+                    else:
+                        main_target = sorted(target_faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]), reverse=True)[0]
                         try:
-                            frame = swapper.get(frame, tf, source_face, paste_back=True)
+                            frame = swapper.get(frame, main_target, default_source_face, paste_back=True)
                         except Exception:
                             pass
-                else:
-                    main_target = sorted(target_faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]), reverse=True)[0]
-                    try:
-                        frame = swapper.get(frame, main_target, source_face, paste_back=True)
-                    except Exception:
-                        pass
         except Exception:
             pass
             
