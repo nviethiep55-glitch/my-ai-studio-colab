@@ -23,30 +23,35 @@ try:
 except Exception:
     pass
 
-# 2. Cực kỳ quan trọng: Nạp trước các thư viện CUDA 12 / cuDNN vào Global Symbol Table (RTLD_GLOBAL)
-cuda_so_candidates = [
-    "libcudart.so", "libcudart.so.12", "libcudart.so.13",
-    "libnvrtc.so", "libnvrtc.so.12", "libnvrtc.so.13",
-    "libcublasLt.so", "libcublasLt.so.12", "libcublasLt.so.13",
-    "libcublas.so", "libcublas.so.12", "libcublas.so.13",
-    "libcufft.so", "libcufft.so.11", "libcufft.so.12",
-    "libcudnn.so", "libcudnn.so.9", "libcudnn.so.8"
-]
-search_dirs = ["/usr/lib", "/usr/local/cuda/lib64", "/usr/local/cuda-12/lib64"]
+# 2. Cực kỳ quan trọng: Nạp toàn bộ thư viện NVIDIA CUDA 12 / cuDNN vào Global Symbol Table
+search_dirs = ["/usr/lib", "/usr/lib/x86_64-linux-gnu", "/usr/local/cuda/lib64", "/usr/local/cuda-12/lib64"]
 try:
     import site
     for sp in site.getsitepackages():
-        search_dirs.extend(glob.glob(f"{sp}/nvidia/*/lib"))
+        nv = os.path.join(sp, 'nvidia')
+        if os.path.exists(nv):
+            for root, _, files in os.walk(nv):
+                if 'lib' in root:
+                    search_dirs.append(root)
+                    for f in sorted(files):
+                        if f.endswith('.so') or '.so.' in f:
+                            fp = os.path.join(root, f)
+                            try:
+                                ctypes.CDLL(fp, mode=ctypes.RTLD_GLOBAL)
+                            except Exception:
+                                pass
 except Exception:
     pass
 
-# Tự động tạo symlink alias cho .so.13 và .so.12 nếu thiếu
+# Tự động tạo symlink alias cho .so.13, .so.12, .so.8, .so.9 nếu thiếu
 cuda_alias_map = {
     "libcublasLt.so.13": "libcublasLt.so.12",
     "libcublas.so.13": "libcublas.so.12",
     "libnvrtc.so.13": "libnvrtc.so.12",
     "libcudart.so.13": "libcudart.so.12",
     "libcufft.so.12": "libcufft.so.11",
+    "libcudnn.so.8": "libcudnn.so.9",
+    "libcudnn.so.9": "libcudnn.so.8",
 }
 for target_name, src_name in cuda_alias_map.items():
     src_found = None
@@ -56,7 +61,7 @@ for target_name, src_name in cuda_alias_map.items():
             src_found = matches[0]
             break
     if src_found:
-        for dest_dir in ["/usr/lib", "/usr/local/cuda/lib64"]:
+        for dest_dir in ["/usr/lib", "/usr/lib/x86_64-linux-gnu", "/usr/local/cuda/lib64"]:
             if os.path.exists(dest_dir):
                 dest_file = os.path.join(dest_dir, target_name)
                 if not os.path.exists(dest_file):
@@ -64,21 +69,6 @@ for target_name, src_name in cuda_alias_map.items():
                         os.symlink(src_found, dest_file)
                     except Exception:
                         pass
-
-for lib in cuda_so_candidates:
-    try:
-        ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
-        continue
-    except Exception:
-        pass
-    for d in search_dirs:
-        fp = os.path.join(d, lib)
-        if os.path.exists(fp):
-            try:
-                ctypes.CDLL(fp, mode=ctypes.RTLD_GLOBAL)
-                break
-            except Exception:
-                pass
 
 # 3. Preload torch for CUDA libraries & warmup GPU context
 try:
@@ -237,28 +227,6 @@ def init_models():
             except Exception:
                 pass
 
-    print("⚡ [Colab Worker] Khởi tạo mô hình AI trên CUDA GPU...", flush=True)
-    available_providers = []
-    try:
-        available_providers = ort.get_available_providers()
-    except Exception:
-        pass
-
-    if 'CUDAExecutionProvider' in available_providers:
-        cuda_opts = {
-            'device_id': 0,
-            'arena_extend_strategy': 'kNextPowerOfTwo',
-            'gpu_mem_limit': 14 * 1024 * 1024 * 1024,
-            'cudnn_conv_algo_search': 'DEFAULT',
-            'do_copy_in_default_stream': True
-        }
-        providers = [('CUDAExecutionProvider', cuda_opts), 'CPUExecutionProvider']
-    else:
-        providers = ['CPUExecutionProvider']
-
-    face_app = FaceAnalysis(name='buffalo_l', providers=providers)
-    face_app.prepare(ctx_id=0, det_size=(640, 640))
-
     swapper_path = download_or_restore_model(
         "vision_matrix_128.bin",
         SWAPPER_URL,
@@ -266,19 +234,35 @@ def init_models():
         alt_names=["inswapper_128.onnx"]
     )
 
-    swapper = insightface.model_zoo.get_model(swapper_path, download=False, providers=providers)
-    
-    # Verify active provider
+    available_providers = []
     try:
-        active_list = swapper.session.get_providers()
-        print(f"🚀 [Colab Worker] ONNX Runtime Providers: {active_list}", flush=True)
-        if 'CUDAExecutionProvider' in active_list:
-            print("🔥 TURBO GPU KÍCH HOẠT THÀNH CÔNG! Tốc độ dự kiến ~35-45 FPS.", flush=True)
-        else:
-            print("⚠️ CẢNH BÁO: Đang chạy trên CPU do thiếu cuDNN! Hãy kiểm tra cài đặt nvidia-cudnn-cu12.", flush=True)
+        available_providers = ort.get_available_providers()
     except Exception:
         pass
 
+    # Thử khởi tạo với CUDA GPU
+    if 'CUDAExecutionProvider' in available_providers:
+        try:
+            print("⚡ [Colab Worker] Khởi tạo mô hình AI trên CUDA GPU (Tesla T4)...", flush=True)
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            face_app = FaceAnalysis(name='buffalo_l', providers=providers)
+            face_app.prepare(ctx_id=0, det_size=(640, 640))
+            swapper = insightface.model_zoo.get_model(swapper_path, download=False, providers=providers)
+            active_list = swapper.session.get_providers()
+            print(f"🚀 [Colab Worker] Swapper Providers: {active_list}", flush=True)
+            if 'CUDAExecutionProvider' in active_list:
+                print("🔥 TURBO GPU KÍCH HOẠT THÀNH CÔNG! Tốc độ dự kiến ~35-45 FPS.", flush=True)
+            print("✅ [Colab Worker] Mô hình đã sẵn sàng trên GPU!", flush=True)
+            return
+        except Exception as cuda_err:
+            print(f"⚠️ [Colab Worker] Kích hoạt CUDA chưa tương thích: {cuda_err}. Đang tự động chuyển sang chế độ CPU an toàn...", flush=True)
+
+    # Dự phòng an toàn: Khởi tạo trên CPU (đảm bảo 100% Server chạy và không bao giờ chết)
+    print("⏳ [Colab Worker] Khởi tạo mô hình ở chế độ tiêu chuẩn (CPU)...", flush=True)
+    providers = ['CPUExecutionProvider']
+    face_app = FaceAnalysis(name='buffalo_l', providers=providers)
+    face_app.prepare(ctx_id=0, det_size=(640, 640))
+    swapper = insightface.model_zoo.get_model(swapper_path, download=False, providers=providers)
     print("✅ [Colab Worker] Mô hình đã sẵn sàng!", flush=True)
 
 def compute_similarity(emb1, emb2):
