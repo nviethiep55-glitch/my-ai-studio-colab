@@ -120,6 +120,7 @@ current_progress = {
 face_app = None
 swapper = None
 enhancer = None
+latest_swapped_file = None
 models_dir = os.environ.get("MODELS_DIR", "/content/models")
 drive_models_dir = os.environ.get("DRIVE_MODELS_DIR", "/content/drive/MyDrive/MyAIStudio_Models")
 os.makedirs(models_dir, exist_ok=True)
@@ -693,6 +694,22 @@ def health_check():
 def get_progress():
     return current_progress
 
+@app.get("/download_latest")
+def download_latest():
+    global latest_swapped_file
+    if latest_swapped_file and os.path.exists(latest_swapped_file) and os.path.getsize(latest_swapped_file) > 1000:
+        return FileResponse(
+            latest_swapped_file,
+            media_type="video/mp4",
+            filename=os.path.basename(latest_swapped_file)
+        )
+    for d in ["/content/drive/MyDrive/output_videos", "/content/drive/MyDrive/AI_Colab_Cache/output_videos", "/tmp"]:
+        if os.path.exists(d):
+            files = sorted(glob.glob(f"{d}/*.mp4"), key=os.path.getmtime, reverse=True)
+            if files and os.path.getsize(files[0]) > 1000:
+                return FileResponse(files[0], media_type="video/mp4", filename=os.path.basename(files[0]))
+    raise HTTPException(status_code=404, detail="Chưa có video thành phẩm sẵn sàng tải về")
+
 @app.post("/swap")
 def process_face_swap(
     source_image: UploadFile = File(...),
@@ -865,15 +882,15 @@ def process_face_swap(
         current_progress["status"] = "encoding"
         current_progress["current_frame"] = total_frames
 
-        # Merge original audio back using FFmpeg
+        # Merge original audio back using FFmpeg (fast NVENC or ultrafast CPU)
         final_out = os.path.join(tmp_dir, "final_swapped.mp4")
-        cmd = [
+        cmd_nvenc = [
             "ffmpeg", "-y",
             "-i", temp_raw_out,
             "-i", vid_in_path,
-            "-c:v", "libx264",
-            "-crf", str(video_crf),
-            "-preset", "veryfast",
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-cq", str(video_crf),
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-map", "0:v:0",
@@ -881,24 +898,45 @@ def process_face_swap(
             "-shortest",
             final_out
         ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        res = subprocess.run(cmd_nvenc, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if res.returncode != 0 or not os.path.exists(final_out) or os.path.getsize(final_out) == 0:
+            cmd_cpu = [
+                "ffmpeg", "-y",
+                "-i", temp_raw_out,
+                "-i", vid_in_path,
+                "-c:v", "libx264",
+                "-crf", str(video_crf),
+                "-preset", "ultrafast",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-map", "0:v:0",
+                "-map", "1:a:0?",
+                "-shortest",
+                final_out
+            ]
+            subprocess.run(cmd_cpu, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
         if not os.path.exists(final_out) or os.path.getsize(final_out) == 0:
             final_out = temp_raw_out
 
+        global latest_swapped_file
+        latest_swapped_file = final_out
+
         current_progress["status"] = "completed"
         current_progress["current_frame"] = total_frames
 
-        # Tự động lưu bản sao trực tiếp vào Google Drive output_videos (ngay trong Drive của người dùng)
-        for d_out in ["/content/drive/MyDrive/output_videos", "/content/drive/MyDrive/AI_Colab_Cache/output_videos"]:
-            try:
-                if os.path.exists("/content/drive/MyDrive"):
-                    os.makedirs(d_out, exist_ok=True)
-                    safe_name = f"swapped_{int(time.time())}_{target_video.filename}"
-                    shutil.copy(final_out, os.path.join(d_out, safe_name))
-                    print(f"🎉 [Colab Worker] Đã lưu video thành phẩm vào Google Drive: {d_out}/{safe_name}", flush=True)
-            except Exception as drive_err:
-                pass
+        # Tự động lưu bản sao trực tiếp vào Google Drive TRONG LUỒNG NGẦM (Không chặn luồng trả lời HTTP)
+        def _bg_drive_backup(f_path, f_name):
+            for d_out in ["/content/drive/MyDrive/output_videos", "/content/drive/MyDrive/AI_Colab_Cache/output_videos"]:
+                try:
+                    if os.path.exists("/content/drive/MyDrive"):
+                        os.makedirs(d_out, exist_ok=True)
+                        safe_name = f"swapped_{int(time.time())}_{f_name}"
+                        shutil.copy(f_path, os.path.join(d_out, safe_name))
+                        print(f"🎉 [Colab Worker] Đã lưu video thành phẩm vào Google Drive: {d_out}/{safe_name}", flush=True)
+                except Exception:
+                    pass
+        threading.Thread(target=_bg_drive_backup, args=(final_out, target_video.filename), daemon=True).start()
 
         return FileResponse(
             final_out,
