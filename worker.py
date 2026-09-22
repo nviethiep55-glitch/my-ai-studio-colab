@@ -68,6 +68,14 @@ try:
     import onnxruntime as ort
     if hasattr(ort, "preload_dlls"):
         ort.preload_dlls()
+except ImportError:
+    print("⚠️ [Colab Worker] onnxruntime chưa có trong môi trường, đang nạp tự động...", flush=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "onnxruntime-gpu"], check=False)
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "onnxruntime"], check=False)
+        import onnxruntime as ort
 except Exception:
     pass
 
@@ -112,14 +120,24 @@ def init_models():
         return
 
     print("⚡ [Colab Worker] Khởi tạo mô hình AI trên CUDA GPU...", flush=True)
-    cuda_opts = {
-        'device_id': 0,
-        'arena_extend_strategy': 'kNextPowerOfTwo',
-        'gpu_mem_limit': 14 * 1024 * 1024 * 1024,
-        'cudnn_conv_algo_search': 'DEFAULT',
-        'do_copy_in_default_stream': True
-    }
-    providers = [('CUDAExecutionProvider', cuda_opts), 'CPUExecutionProvider']
+    available_providers = []
+    try:
+        available_providers = ort.get_available_providers()
+    except Exception:
+        pass
+
+    if 'CUDAExecutionProvider' in available_providers:
+        cuda_opts = {
+            'device_id': 0,
+            'arena_extend_strategy': 'kNextPowerOfTwo',
+            'gpu_mem_limit': 14 * 1024 * 1024 * 1024,
+            'cudnn_conv_algo_search': 'DEFAULT',
+            'do_copy_in_default_stream': True
+        }
+        providers = [('CUDAExecutionProvider', cuda_opts), 'CPUExecutionProvider']
+    else:
+        providers = ['CPUExecutionProvider']
+
     face_app = FaceAnalysis(name='buffalo_l', providers=providers)
     face_app.prepare(ctx_id=0, det_size=(640, 640))
 
