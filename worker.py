@@ -8,7 +8,7 @@ import threading
 import subprocess
 import glob
 import ctypes
-from typing import Optional
+from typing import Optional, List
 
 # 1. Dọn dẹp triệt để bất kỳ symlink giả .so.13 nào (loại bỏ lỗi version 'libcudart.so.13' not found)
 for bad_dir in ["/usr/lib", "/usr/lib/x86_64-linux-gnu", "/usr/local/cuda/lib64"]:
@@ -805,9 +805,11 @@ def download_latest():
 
 @app.post("/swap")
 def process_face_swap(
-    source_image: UploadFile = File(...),
+    source_image: Optional[UploadFile] = File(None),
+    source_images: Optional[List[UploadFile]] = File(None),
     target_video: UploadFile = File(...),
     target_ref_image: Optional[UploadFile] = File(None),
+    target_ref_images: Optional[List[UploadFile]] = File(None),
     target_face_image: Optional[UploadFile] = File(None),
     has_target_ref: str = Form("false"),
     similarity_threshold: float = Form(0.40),
@@ -835,34 +837,88 @@ def process_face_swap(
 
     tmp_dir = tempfile.mkdtemp(prefix="studio_render_")
     try:
-        # Save uploaded source face image
-        src_path = os.path.join(tmp_dir, "source_face.jpg")
-        with open(src_path, "wb") as f:
-            shutil.copyfileobj(source_image.file, f)
+        # 1. Thu thập tất cả ảnh mặt mới (source_images / source_image)
+        all_new_uploads = []
+        if source_images:
+            all_new_uploads.extend(source_images)
+        if source_image and source_image not in all_new_uploads:
+            all_new_uploads.insert(0, source_image)
 
-        src_bgr = cv2.imread(src_path)
-        if src_bgr is None:
-            raise HTTPException(status_code=400, detail="Không thể đọc ảnh mặt mới (source_image)")
+        new_faces_map = {}
+        default_source_face = None
 
-        src_faces = face_app.get(src_bgr)
-        if len(src_faces) == 0:
-            raise HTTPException(status_code=400, detail="Không tìm thấy khuôn mặt nào trong ảnh mặt mới")
+        for idx, up_f in enumerate(all_new_uploads):
+            if not up_f or not up_f.filename:
+                continue
+            stem = os.path.splitext(up_f.filename)[0].strip().lower()
+            s_path = os.path.join(tmp_dir, f"src_{idx}_{up_f.filename}")
+            with open(s_path, "wb") as f:
+                shutil.copyfileobj(up_f.file, f)
+            bgr = cv2.imread(s_path)
+            if bgr is not None:
+                faces = face_app.get(bgr)
+                if faces:
+                    f_obj = max(faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]))
+                    new_faces_map[stem] = f_obj
+                    if default_source_face is None:
+                        default_source_face = f_obj
 
-        source_face = max(src_faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]))
+        if default_source_face is None:
+            raise HTTPException(status_code=400, detail="Không tìm thấy khuôn mặt nào trong ảnh mặt mới (mat_moi)")
 
-        # Handle target reference face (selective swap for multi-character video)
-        target_ref_face = None
-        tgt_upload = target_ref_image or target_face_image
-        has_ref = (has_target_ref.lower() in ("true", "1") or target_face_image is not None) and tgt_upload is not None
-        if has_ref and tgt_upload is not None:
-            ref_path = os.path.join(tmp_dir, "ref_target.jpg")
-            with open(ref_path, "wb") as f:
-                shutil.copyfileobj(tgt_upload.file, f)
-            ref_bgr = cv2.imread(ref_path)
-            if ref_bgr is not None:
-                r_faces = face_app.get(ref_bgr)
-                if len(r_faces) > 0:
-                    target_ref_face = max(r_faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]))
+        # 2. Thu thập tất cả ảnh người trong clip cần đổi (target_ref_images / target_ref_image)
+        all_ref_uploads = []
+        if target_ref_images:
+            all_ref_uploads.extend(target_ref_images)
+        if target_ref_image and target_ref_image not in all_ref_uploads:
+            all_ref_uploads.insert(0, target_ref_image)
+        elif target_face_image and target_face_image not in all_ref_uploads:
+            all_ref_uploads.insert(0, target_face_image)
+
+        ref_faces_map = {}
+        for idx, up_f in enumerate(all_ref_uploads):
+            if not up_f or not up_f.filename:
+                continue
+            stem = os.path.splitext(up_f.filename)[0].strip().lower()
+            r_path = os.path.join(tmp_dir, f"ref_{idx}_{up_f.filename}")
+            with open(r_path, "wb") as f:
+                shutil.copyfileobj(up_f.file, f)
+            bgr = cv2.imread(r_path)
+            if bgr is not None:
+                faces = face_app.get(bgr)
+                if faces:
+                    f_obj = max(faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]))
+                    ref_faces_map[stem] = f_obj
+
+        # 3. Tạo danh sách các cặp hoán đổi 1:1 theo tên tệp (A -> A, B -> B)
+        swap_pairs = []
+        if ref_faces_map:
+            print(f"🎯 [Colab Worker] Kích hoạt chế độ ghép cặp đích danh ({len(ref_faces_map)} nhân vật)...", flush=True)
+            for r_stem, r_obj in ref_faces_map.items():
+                if r_stem in new_faces_map:
+                    swap_pairs.append({
+                        'ref_face': r_obj,
+                        'source_face': new_faces_map[r_stem],
+                        'name': r_stem
+                    })
+                    print(f"  🔗 [Ghép Cặp 1:1]: Người trong clip '{r_stem}' ➡️ Mặt mới '{r_stem}'", flush=True)
+                elif len(new_faces_map) == 1:
+                    swap_pairs.append({
+                        'ref_face': r_obj,
+                        'source_face': default_source_face,
+                        'name': r_stem
+                    })
+                    print(f"  🔗 [Ghép Cặp]: Người trong clip '{r_stem}' ➡️ Mặt mới duy nhất", flush=True)
+                else:
+                    idx = len(swap_pairs)
+                    new_keys = list(new_faces_map.keys())
+                    matched_k = new_keys[idx] if idx < len(new_keys) else new_keys[0]
+                    swap_pairs.append({
+                        'ref_face': r_obj,
+                        'source_face': new_faces_map[matched_k],
+                        'name': r_stem
+                    })
+                    print(f"  🔗 [Ghép Cặp Thứ Tự]: Người trong clip '{r_stem}' ➡️ Mặt mới '{matched_k}'", flush=True)
 
         # Save uploaded video
         vid_in_path = os.path.join(tmp_dir, "input_video.mp4")
@@ -932,38 +988,58 @@ def process_face_swap(
             try:
                 faces = face_app.get(frame)
                 if len(faces) > 0:
-                    targets_to_swap = []
-                    if face_selector_mode == "all":
-                        targets_to_swap = faces
-                    elif face_selector_mode == "reference" and target_ref_face is not None:
-                        for f in faces:
-                            sim = compute_similarity(f.embedding, target_ref_face.embedding)
-                            if sim >= similarity_threshold:
-                                targets_to_swap.append(f)
-                    else: # "largest" or default
-                        if target_ref_face is not None and has_ref:
-                            for f in faces:
-                                sim = compute_similarity(f.embedding, target_ref_face.embedding)
-                                if sim >= similarity_threshold:
-                                    targets_to_swap.append(f)
-                        if not targets_to_swap:
+                    if swap_pairs:
+                        # 🌟 CHẾ ĐỘ NHIỀU NHÂN VẬT THEO CẶP TÊN (MULTI-CHARACTER 1:1 MATCHING)
+                        used_targets = set()
+                        for pair in swap_pairs:
+                            best_face = None
+                            best_sim = -1.0
+                            for f_idx, f in enumerate(faces):
+                                if f_idx in used_targets:
+                                    continue
+                                sim = compute_similarity(f.embedding, pair['ref_face'].embedding)
+                                if sim >= similarity_threshold and sim > best_sim:
+                                    best_sim = sim
+                                    best_face = (f_idx, f)
+                            
+                            if best_face is not None:
+                                f_idx, target_f = best_face
+                                used_targets.add(f_idx)
+                                try:
+                                    bgr_fake, M = swapper.get(frame, target_f, pair['source_face'], paste_back=False)
+                                    if active_enhancer is not None:
+                                        bgr_fake = enhance_face(active_enhancer, bgr_fake, blend=enhancer_blend)
+
+                                    if color_match_val > 0.0:
+                                        target_crop = cv2.warpAffine(frame, M, (bgr_fake.shape[1], bgr_fake.shape[0]))
+                                        bgr_fake = match_skin_and_lighting(bgr_fake, target_crop, blend=color_match_val)
+
+                                    frame = paste_back_seamless(frame, bgr_fake, M, mask_blur_pct=blur_val, occluder_sess=active_occluder)
+                                except Exception:
+                                    frame = swapper.get(frame, target_f, pair['source_face'], paste_back=True)
+                    else:
+                        # 🌟 CHẾ ĐỘ 1 NHÂN VẬT TIÊU CHUẨN
+                        targets_to_swap = []
+                        if face_selector_mode == "all":
+                            targets_to_swap = faces
+                        else: # largest face
                             largest = max(faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]))
                             targets_to_swap.append(largest)
 
-                    for target_f in targets_to_swap:
-                        try:
-                            bgr_fake, M = swapper.get(frame, target_f, source_face, paste_back=False)
-                            if active_enhancer is not None:
-                                bgr_fake = enhance_face(active_enhancer, bgr_fake, blend=enhancer_blend)
+                        for target_f in targets_to_swap:
+                            try:
+                                bgr_fake, M = swapper.get(frame, target_f, default_source_face, paste_back=False)
+                                if active_enhancer is not None:
+                                    bgr_fake = enhance_face(active_enhancer, bgr_fake, blend=enhancer_blend)
 
-                            # 🌟 Tiệp màu da & ánh sáng môi trường (Skin & Lighting Match - Triệt tiêu giả trân)
-                            if color_match_val > 0.0:
-                                target_crop = cv2.warpAffine(frame, M, (bgr_fake.shape[1], bgr_fake.shape[0]))
-                                bgr_fake = match_skin_and_lighting(bgr_fake, target_crop, blend=color_match_val)
+                                # Tiệp màu da & ánh sáng môi trường
+                                if color_match_val > 0.0:
+                                    target_crop = cv2.warpAffine(frame, M, (bgr_fake.shape[1], bgr_fake.shape[0]))
+                                    bgr_fake = match_skin_and_lighting(bgr_fake, target_crop, blend=color_match_val)
 
-                            frame = paste_back_seamless(frame, bgr_fake, M, mask_blur_pct=blur_val, occluder_sess=active_occluder)
-                        except Exception:
-                            frame = swapper.get(frame, target_f, source_face, paste_back=True)
+                                frame = paste_back_seamless(frame, bgr_fake, M, mask_blur_pct=blur_val, occluder_sess=active_occluder)
+                            except Exception:
+                                frame = swapper.get(frame, target_f, default_source_face, paste_back=True)
             except Exception as e:
                 pass
 
