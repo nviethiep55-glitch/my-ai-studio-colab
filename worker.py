@@ -10,6 +10,12 @@ import glob
 import ctypes
 from typing import Optional, List
 
+# Tối ưu cuDNN cho GPU Tesla T4 (triệt tiêu lỗi CUDNN_FE failure / HEURISTIC_QUERY_FAILED trên cuDNN 9)
+os.environ["ORT_CUDA_CONV_ALGO_SEARCH"] = "DEFAULT"
+os.environ["CUDNN_FRONTEND_LOG_INFO"] = "0"
+os.environ["CUDNN_LOGINFO_DBG"] = "0"
+os.environ["CUDNN_LOGWARN_DBG"] = "0"
+
 # 1. Dọn dẹp triệt để bất kỳ symlink giả .so.13 nào (loại bỏ lỗi version 'libcudart.so.13' not found)
 for bad_dir in ["/usr/lib", "/usr/lib/x86_64-linux-gnu", "/usr/local/cuda/lib64"]:
     for f in glob.glob(os.path.join(bad_dir, "*so.13*")):
@@ -238,11 +244,19 @@ def init_models():
     except Exception:
         pass
 
+    # Cấu hình tối ưu CUDA 12 cho GPU Tesla T4 (triệt tiêu lỗi cuDNN FE Heuristic Conv_19 / Conv_62)
+    cuda_options = {
+        'device_id': 0,
+        'arena_extend_strategy': 'kNextPowerOfTwo',
+        'cudnn_conv_algo_search': 'DEFAULT',
+        'do_copy_in_default_stream': True,
+    }
+
     # Thử khởi tạo với CUDA GPU
     if 'CUDAExecutionProvider' in available_providers:
         try:
-            print("⚡ [Colab Worker] Khởi tạo mô hình AI trên CUDA GPU (Tesla T4)...", flush=True)
-            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            print("⚡ [Colab Worker] Khởi tạo mô hình AI trên CUDA GPU (Tesla T4 Turbo)...", flush=True)
+            providers = [('CUDAExecutionProvider', cuda_options), 'CPUExecutionProvider']
             face_app = FaceAnalysis(name='buffalo_l', providers=providers)
             face_app.prepare(ctx_id=0, det_size=(640, 640))
             swapper = insightface.model_zoo.get_model(swapper_path, download=False, providers=providers)
@@ -366,8 +380,14 @@ def get_occluder(model_type="dfl_xseg"):
             available_providers = ort.get_available_providers()
         except Exception:
             pass
+        cuda_options = {
+            'device_id': 0,
+            'arena_extend_strategy': 'kNextPowerOfTwo',
+            'cudnn_conv_algo_search': 'DEFAULT',
+            'do_copy_in_default_stream': True,
+        }
         if 'CUDAExecutionProvider' in available_providers:
-            providers = [('CUDAExecutionProvider', {'device_id': 0}), 'CPUExecutionProvider']
+            providers = [('CUDAExecutionProvider', cuda_options), 'CPUExecutionProvider']
         else:
             providers = ['CPUExecutionProvider']
         try:
@@ -398,8 +418,14 @@ def get_enhancer(model_type="gfpgan"):
             available_providers = ort.get_available_providers()
         except Exception:
             pass
+        cuda_options = {
+            'device_id': 0,
+            'arena_extend_strategy': 'kNextPowerOfTwo',
+            'cudnn_conv_algo_search': 'DEFAULT',
+            'do_copy_in_default_stream': True,
+        }
         if 'CUDAExecutionProvider' in available_providers:
-            providers = [('CUDAExecutionProvider', {'device_id': 0}), 'CPUExecutionProvider']
+            providers = [('CUDAExecutionProvider', cuda_options), 'CPUExecutionProvider']
         else:
             providers = ['CPUExecutionProvider']
         try:
@@ -828,6 +854,7 @@ def process_face_swap(
     # Normalize options
     blur_val = mask_blur / 100.0 if mask_blur > 1.0 else mask_blur
     color_match_val = color_match / 100.0 if color_match > 1.0 else color_match
+    blend_val = enhancer_blend / 100.0 if enhancer_blend > 1.0 else enhancer_blend
     enhancer_type = face_enhancer
     if use_gfpgan.lower() in ("true", "1") and enhancer_type == "none":
         enhancer_type = "gfpgan"
@@ -1008,7 +1035,7 @@ def process_face_swap(
                                 try:
                                     bgr_fake, M = swapper.get(frame, target_f, pair['source_face'], paste_back=False)
                                     if active_enhancer is not None:
-                                        bgr_fake = enhance_face(active_enhancer, bgr_fake, blend=enhancer_blend)
+                                        bgr_fake = enhance_face(active_enhancer, bgr_fake, blend=blend_val)
 
                                     if color_match_val > 0.0:
                                         target_crop = cv2.warpAffine(frame, M, (bgr_fake.shape[1], bgr_fake.shape[0]))
@@ -1030,7 +1057,7 @@ def process_face_swap(
                             try:
                                 bgr_fake, M = swapper.get(frame, target_f, default_source_face, paste_back=False)
                                 if active_enhancer is not None:
-                                    bgr_fake = enhance_face(active_enhancer, bgr_fake, blend=enhancer_blend)
+                                    bgr_fake = enhance_face(active_enhancer, bgr_fake, blend=blend_val)
 
                                 # Tiệp màu da & ánh sáng môi trường
                                 if color_match_val > 0.0:
